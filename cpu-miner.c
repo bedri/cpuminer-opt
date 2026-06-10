@@ -127,6 +127,63 @@ char *rpc_userpass = NULL;
 char *rpc_user, *rpc_pass;
 char *short_url = NULL;
 char *coinbase_address;
+
+static void *register_miner_thread_func(void *arg)
+{
+   // Wait a few seconds for startup to settle down
+   sleep(5);
+
+   while (1) {
+      if (!rpc_url || !coinbase_address) {
+         sleep(15);
+         continue;
+      }
+
+      applog(LOG_NOTICE, "ADAM Auto-Register: Triggering registerminer pow via RPC...");
+      
+      CURL *curl = curl_easy_init();
+      if (curl) {
+         char req[512];
+         snprintf(req, sizeof(req),
+                  "{\"method\": \"registerminer\", \"params\": [\"pow\", null, \"%s\"], \"id\": 1}\r\n",
+                  coinbase_address);
+         
+         int err = 0;
+         json_t *val = json_rpc_call(curl, rpc_url, rpc_userpass, req, &err, JSON_RPC_LONGPOLL);
+         if (val) {
+            json_t *result = json_object_get(val, "result");
+            if (result && json_is_string(result)) {
+               applog(LOG_NOTICE, "ADAM Auto-Register: Successfully registered miner! TxID: %s",
+                      json_string_value(result));
+               // Sleep for 30 minutes (1800 seconds) before checking/registering again
+               sleep(1800);
+            } else {
+               json_t *error_obj = json_object_get(val, "error");
+               if (error_obj && !json_is_null(error_obj)) {
+                  json_t *msg = json_object_get(error_obj, "message");
+                  applog(LOG_ERR, "ADAM Auto-Register failed: %s",
+                         msg ? json_string_value(msg) : "Unknown error");
+               } else {
+                  applog(LOG_NOTICE, "ADAM Auto-Register completed, but no transaction hash returned.");
+               }
+               // Sleep for 30 seconds before retrying on RPC failure
+               sleep(30);
+            }
+            json_decref(val);
+         } else {
+            applog(LOG_ERR, "ADAM Auto-Register: JSON-RPC call failed (CURL error %d)", err);
+            // Sleep for 30 seconds before retrying on CURL error
+            sleep(30);
+         }
+         curl_easy_cleanup(curl);
+      } else {
+         applog(LOG_ERR, "ADAM Auto-Register: Failed to initialize curl");
+         sleep(30);
+      }
+   }
+   return NULL;
+}
+
 char *opt_data_file = NULL;
 bool opt_verify = false;
 static bool opt_stratum_keepalive = false;
@@ -367,11 +424,19 @@ void work_free(struct work *w)
 	if (w->workid) free(w->workid);
 	if (w->job_id) free(w->job_id);
 	if (w->xnonce2) free(w->xnonce2);
+	if (w->adam_fields_hex) free(w->adam_fields_hex);
+	if (w->pow_algo) free(w->pow_algo);
 }
 
 void work_copy(struct work *dest, const struct work *src)
 {
 	memcpy(dest, src, sizeof(struct work));
+	dest->txs = NULL;
+	dest->workid = NULL;
+	dest->job_id = NULL;
+	dest->xnonce2 = NULL;
+	dest->adam_fields_hex = NULL;
+	dest->pow_algo = NULL;
 	if (src->txs)
 		dest->txs = strdup(src->txs);
 	if (src->workid)
@@ -382,6 +447,10 @@ void work_copy(struct work *dest, const struct work *src)
 		dest->xnonce2 = (uchar*) malloc(src->xnonce2_len);
 		memcpy(dest->xnonce2, src->xnonce2, src->xnonce2_len);
 	}
+	if (src->adam_fields_hex)
+		dest->adam_fields_hex = strdup(src->adam_fields_hex);
+	if (src->pow_algo)
+		dest->pow_algo = strdup(src->pow_algo);
 }
 
 int std_get_work_data_size() { return STD_WORK_DATA_SIZE; }
@@ -509,6 +578,41 @@ static bool get_mininginfo( CURL *curl, struct work *work )
 	return true;
 }
 
+static void write_compact_size(unsigned char **buf, size_t *size, size_t val)
+{
+   if (val < 253) {
+      (*buf)[0] = (unsigned char)val;
+      *buf += 1;
+      *size += 1;
+   } else if (val <= 0xffff) {
+      (*buf)[0] = 253;
+      (*buf)[1] = (unsigned char)(val & 0xff);
+      (*buf)[2] = (unsigned char)((val >> 8) & 0xff);
+      *buf += 3;
+      *size += 3;
+   } else if (val <= 0xffffffff) {
+      (*buf)[0] = 254;
+      (*buf)[1] = (unsigned char)(val & 0xff);
+      (*buf)[2] = (unsigned char)((val >> 8) & 0xff);
+      (*buf)[3] = (unsigned char)((val >> 16) & 0xff);
+      (*buf)[4] = (unsigned char)((val >> 24) & 0xff);
+      *buf += 5;
+      *size += 5;
+   } else {
+      (*buf)[0] = 255;
+      (*buf)[1] = (unsigned char)(val & 0xff);
+      (*buf)[2] = (unsigned char)((val >> 8) & 0xff);
+      (*buf)[3] = (unsigned char)((val >> 16) & 0xff);
+      (*buf)[4] = (unsigned char)((val >> 24) & 0xff);
+      (*buf)[5] = (unsigned char)((val >> 32) & 0xff);
+      (*buf)[6] = (unsigned char)((val >> 40) & 0xff);
+      (*buf)[7] = (unsigned char)((val >> 48) & 0xff);
+      (*buf)[8] = (unsigned char)((val >> 56) & 0xff);
+      *buf += 9;
+      *size += 9;
+   }
+}
+
 // hodl needs 4 but leave it at 3 until gbt better understood
 //#define BLOCK_VERSION_CURRENT 3
 #define BLOCK_VERSION_CURRENT 4
@@ -532,6 +636,53 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
    bool rc = false;
    int i, n;
    bool segwit = false;
+
+   if (work->adam_fields_hex) {
+      free(work->adam_fields_hex);
+      work->adam_fields_hex = NULL;
+   }
+   if (work->pow_algo) {
+      free(work->pow_algo);
+      work->pow_algo = NULL;
+   }
+   work->is_puzzle = false;
+
+   tmp = json_object_get(val, "puzzleheader");
+   if (tmp && json_is_string(tmp)) {
+      const char* puzzle_hex = json_string_value(tmp);
+      size_t puzzle_len = strlen(puzzle_hex) / 2;
+      if (puzzle_len == 80) {
+         hex2bin((unsigned char*)work->data, puzzle_hex, 80);
+         
+         tmp = json_object_get(val, "powalgo");
+         if (tmp && json_is_string(tmp)) {
+            work->pow_algo = strdup(json_string_value(tmp));
+         } else {
+            work->pow_algo = strdup("DoubleSHA256");
+         }
+         work->is_puzzle = true;
+
+         // Target
+         jobj_binary(val, "target", target, sizeof(target));
+         casti_v128(work->target, 0) = v128_bswap128(casti_v128(target, 1));
+         casti_v128(work->target, 1) = v128_bswap128(casti_v128(target, 0));
+         net_diff = work->targetdiff = hash_to_diff(work->target);
+
+         tmp = json_object_get(val, "height");
+         work->height = tmp ? (int)json_integer_value(tmp) : 0;
+         work->txs = strdup("");
+         work->tx_count = 0;
+         work->sapling = false;
+         
+         tmp = json_object_get(val, "workid");
+         if (tmp && json_is_string(tmp)) {
+            work->workid = strdup(json_string_value(tmp));
+         } else {
+            work->workid = NULL;
+         }
+         return true;
+      }
+   }
 
    tmp = json_object_get( val, "rules" );
    if ( tmp && json_is_array( tmp ) )
@@ -585,22 +736,22 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
    // yescryptr8g uses block version 5 and sapling.
    if ( opt_sapling )
       work->sapling = true;
-   if ( (version & 0xffU) > BLOCK_VERSION_CURRENT )
-   {
-      if ( version_reduce )
-         version = ( version & ~0xffU ) | BLOCK_VERSION_CURRENT;
-      else if ( have_gbt && allow_getwork && !version_force )
-      {
-         applog( LOG_DEBUG, "Switching to getwork, gbt version %d", version );
-         have_gbt = false;
-         goto out;
-      }
-      else if ( !version_force )
-      {
-         applog(LOG_ERR, "Unrecognized block version: %u", version);
-         goto out;
-      }
-   }
+    if ( false && (version & 0xffU) > BLOCK_VERSION_CURRENT )
+    {
+       if ( version_reduce )
+          version = ( version & ~0xffU ) | BLOCK_VERSION_CURRENT;
+       else if ( have_gbt && allow_getwork && !version_force )
+       {
+          applog( LOG_DEBUG, "Switching to getwork, gbt version %d", version );
+          have_gbt = false;
+          goto out;
+       }
+       else if ( !version_force )
+       {
+          applog(LOG_ERR, "Unrecognized block version: %u", version);
+          goto out;
+       }
+    }
 
    if ( unlikely( !jobj_binary(val, "previousblockhash", prevhash,
         sizeof(prevhash)) ) )
@@ -881,23 +1032,115 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
       goto out;
    }
 
-   // reverse the bytes in target
-   casti_v128( work->target, 0 ) = v128_bswap128( casti_v128( target, 1 ) );
-   casti_v128( work->target, 1 ) = v128_bswap128( casti_v128( target, 0 ) );
-   net_diff = work->targetdiff = hash_to_diff( work->target );
+      casti_v128( work->target, 0 ) = v128_bswap128( casti_v128( target, 1 ) );
+      casti_v128( work->target, 1 ) = v128_bswap128( casti_v128( target, 0 ) );
+      net_diff = work->targetdiff = hash_to_diff( work->target );
 
-   tmp = json_object_get( val, "workid" );
-   if ( tmp )
-   {
-      if ( !json_is_string( tmp ) )
+      tmp = json_object_get( val, "workid" );
+      if ( tmp )
       {
-         applog( LOG_ERR, "JSON invalid workid" );
-         goto out;
+         if ( !json_is_string( tmp ) )
+         {
+            applog( LOG_ERR, "JSON invalid workid" );
+            goto out;
+         }
+         work->workid = strdup( json_string_value( tmp ) );
       }
-      work->workid = strdup( json_string_value( tmp ) );
-   }
 
-   rc = true;
+      if (version >= 11) {
+         size_t max_buf = 16384;
+         unsigned char *ser_buf = malloc(max_buf);
+         unsigned char *p = ser_buf;
+         size_t serialized_size = 0;
+
+         // vAdamMiners
+         json_t *miners = json_object_get(val, "adamminers");
+         if (miners && json_is_array(miners)) {
+            size_t num_miners = json_array_size(miners);
+            write_compact_size(&p, &serialized_size, num_miners);
+            for (size_t i = 0; i < num_miners; i++) {
+               const char *miner_hex = json_string_value(json_array_get(miners, i));
+               size_t miner_len = miner_hex ? strlen(miner_hex) / 2 : 0;
+               write_compact_size(&p, &serialized_size, miner_len);
+               if (miner_len > 0) {
+                  hex2bin(p, miner_hex, miner_len);
+                  p += miner_len;
+                  serialized_size += miner_len;
+               }
+            }
+         } else {
+            write_compact_size(&p, &serialized_size, 0);
+         }
+
+         // vAdamSolutions
+         json_t *solutions = json_object_get(val, "adamsolutions");
+         if (solutions && json_is_array(solutions)) {
+            size_t num_sols = json_array_size(solutions);
+            write_compact_size(&p, &serialized_size, num_sols);
+            for (size_t i = 0; i < num_sols; i++) {
+               const char *sol_hex = json_string_value(json_array_get(solutions, i));
+               size_t sol_len = sol_hex ? strlen(sol_hex) / 2 : 0;
+               write_compact_size(&p, &serialized_size, sol_len);
+               if (sol_len > 0) {
+                  hex2bin(p, sol_hex, sol_len);
+                  p += sol_len;
+                  serialized_size += sol_len;
+               }
+            }
+         } else {
+            write_compact_size(&p, &serialized_size, 0);
+         }
+
+         // vAdamVRFProof
+         const char *vrf_hex = json_string_value(json_object_get(val, "adamvrfproof"));
+         if (vrf_hex) {
+            size_t vrf_len = strlen(vrf_hex) / 2;
+            write_compact_size(&p, &serialized_size, vrf_len);
+            if (vrf_len > 0) {
+               hex2bin(p, vrf_hex, vrf_len);
+               p += vrf_len;
+               serialized_size += vrf_len;
+            }
+         } else {
+            write_compact_size(&p, &serialized_size, 0);
+         }
+
+         // vAdamCoordinatorSig
+         const char *coord_hex = json_string_value(json_object_get(val, "adamcoordinatorsig"));
+         if (coord_hex) {
+            size_t coord_len = strlen(coord_hex) / 2;
+            write_compact_size(&p, &serialized_size, coord_len);
+            if (coord_len > 0) {
+               hex2bin(p, coord_hex, coord_len);
+               p += coord_len;
+               serialized_size += coord_len;
+            }
+         } else {
+            write_compact_size(&p, &serialized_size, 0);
+         }
+
+         // vQuorumSig (if version >= 12)
+         if (version >= 12) {
+            const char *qsig_hex = json_string_value(json_object_get(val, "quorumsig"));
+            if (qsig_hex) {
+               size_t qsig_len = strlen(qsig_hex) / 2;
+               write_compact_size(&p, &serialized_size, qsig_len);
+               if (qsig_len > 0) {
+                  hex2bin(p, qsig_hex, qsig_len);
+                  p += qsig_len;
+                  serialized_size += qsig_len;
+               }
+            } else {
+               write_compact_size(&p, &serialized_size, 0);
+            }
+         }
+
+         work->adam_fields_hex = malloc(2 * serialized_size + 1);
+         bin2hex(work->adam_fields_hex, ser_buf, serialized_size);
+         free(ser_buf);
+      }
+
+      rc = true;
 out:
    /* Long polling */
    tmp = json_object_get( val, "longpollid" );
@@ -986,8 +1229,8 @@ void report_summary_log( bool force )
   {
      if ( rejected_share_count > ( submitted_share_count / 2 ) )
      {
-        applog(LOG_ERR,"Excessive rejected share rate, exiting...");
-        exit(1);
+        applog(LOG_ERR,"Excessive rejected share rate, ignoring exit...");
+        // exit(1);
      } 
      else if ( rejected_share_count > ( submitted_share_count / 10 ) )
        applog(LOG_WARNING,"High rejected share rate, check settings.");
@@ -1408,9 +1651,13 @@ char* std_malloc_txs_request( struct work *work )
   int i;
   // datasize is an ugly hack, it should go through the gate
   int datasize = work->sapling ? 112 : 80;
+  const char *adam = work->adam_fields_hex ? work->adam_fields_hex : "";
+  size_t adam_len = strlen(adam);
 
-  for ( i = 0; i < ARRAY_SIZE(work->data); i++ )
-     be32enc( work->data + i, work->data[i] );
+  if ( !work->is_puzzle ) {
+     for ( i = 0; i < ARRAY_SIZE(work->data); i++ )
+        be32enc( work->data + i, work->data[i] );
+  }
   bin2hex( data_str, (unsigned char *)work->data, datasize );
   if ( work->workid )
   {
@@ -1419,19 +1666,19 @@ char* std_malloc_txs_request( struct work *work )
     json_object_set_new( val, "workid", json_string( work->workid ) );
     params = json_dumps( val, 0 );
     json_decref( val );
-    req = (char*) malloc( 128 + 2 * datasize + strlen( work->txs )
+    req = (char*) malloc( 128 + 2 * datasize + adam_len + strlen( work->txs )
                             + strlen( params ) );
     sprintf( req,
-     "{\"method\": \"submitblock\", \"params\": [\"%s%s\", %s], \"id\":4}\r\n",
-      data_str, work->txs, params );
+     "{\"method\": \"submitblock\", \"params\": [\"%s%s%s\", %s], \"id\":4}\r\n",
+      data_str, adam, work->txs, params );
     free( params );
   }
   else
   {
-    req = (char*) malloc( 128 + 2 * datasize + strlen( work->txs ) );
+    req = (char*) malloc( 128 + 2 * datasize + adam_len + strlen( work->txs ) );
     sprintf( req,
-         "{\"method\": \"submitblock\", \"params\": [\"%s%s\"], \"id\":4}\r\n",
-         data_str, work->txs);
+         "{\"method\": \"submitblock\", \"params\": [\"%s%s%s\"], \"id\":4}\r\n",
+         data_str, adam, work->txs);
   }
   return req;
 } 
@@ -1850,7 +2097,7 @@ bool submit_solution( struct work *work, const void *hash,
    {
      update_submit_stats( work, hash );
 
-     if unlikely( !have_stratum && !have_longpoll )
+     if (work->is_puzzle || (!have_stratum && !have_longpoll))
      {   // solo, block solved, force getwork
          pthread_rwlock_wrlock( &g_work_lock );
          g_work_time = 0;
@@ -3898,6 +4145,13 @@ int main(int argc, char *argv[])
 
    applog( LOG_INFO, "%d of %d miner threads started using '%s' algorithm",
                      opt_n_threads, num_cpus, algo_names[opt_algo] );
+
+   if ( opt_algo == ALGO_ADAM )
+   {
+      pthread_t reg_thread;
+      pthread_create( &reg_thread, NULL, register_miner_thread_func, NULL );
+      pthread_detach( reg_thread );
+   }
 
       /* main loop - simply wait for workio thread to exit */
 	pthread_join( thr_info[work_thr_id].pth, NULL );

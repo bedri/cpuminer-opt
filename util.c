@@ -1124,18 +1124,29 @@ static size_t bech32_to_script(uint8_t *out, size_t outsz, const char *addr) {
 size_t address_to_script( unsigned char *out, size_t outsz, const char *addr )
 {
 	unsigned char addrbin[ pk_buffer_size_max ];
-	int addrver;
+	int addrver = -1;
 	size_t rv;
+	int decoded_sz = 0;
 
-	if ( !b58dec( addrbin, outsz, addr ) )
+	if ( b58dec( addrbin, 25, addr ) ) {
+		addrver = b58check( addrbin, 25, addr );
+		if ( addrver >= 0 ) {
+			decoded_sz = 25;
+		}
+	}
+
+	if ( decoded_sz == 0 && b58dec( addrbin, 26, addr ) ) {
+		addrver = b58check( addrbin, 26, addr );
+		if ( addrver >= 0 ) {
+			decoded_sz = 26;
+		}
+	}
+
+	if ( decoded_sz == 0 )
 		return bech32_to_script( out, outsz, addr );
 
-   addrver = b58check( addrbin, outsz, addr );
-   if ( addrver < 0 )
-		return 0;
-
    if ( opt_debug )
-      applog( LOG_INFO, "Coinbase address uses B58 coding");
+      applog( LOG_INFO, "Coinbase address uses B58 coding, size %d, ver %d", decoded_sz, addrver);
 
    switch ( addrver )
    {
@@ -1145,7 +1156,10 @@ size_t address_to_script( unsigned char *out, size_t outsz, const char *addr )
 				return rv;
 			out[ 0] = 0xa9;  /* OP_HASH160 */
 			out[ 1] = 0x14;  /* push 20 bytes */
-			memcpy( &out[2], &addrbin[1], 20 );
+			if ( decoded_sz == 26 )
+				memcpy( &out[2], &addrbin[2], 20 );
+			else
+				memcpy( &out[2], &addrbin[1], 20 );
 			out[22] = 0x87;  /* OP_EQUAL */
 			return rv;
 		default:
@@ -1154,7 +1168,10 @@ size_t address_to_script( unsigned char *out, size_t outsz, const char *addr )
 			out[ 0] = 0x76;  /* OP_DUP */
 			out[ 1] = 0xa9;  /* OP_HASH160 */
 			out[ 2] = 0x14;  /* push 20 bytes */
-			memcpy( &out[3], &addrbin[1], 20 );
+			if ( decoded_sz == 26 )
+				memcpy( &out[3], &addrbin[2], 20 );
+			else
+				memcpy( &out[3], &addrbin[1], 20 );
 			out[23] = 0x88;  /* OP_EQUALVERIFY */
 			out[24] = 0xac;  /* OP_CHECKSIG */
 			return rv;

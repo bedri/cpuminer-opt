@@ -189,6 +189,8 @@ cpuminer_SOURCES = \
   algo/shavite/shavite-hash-4way.c \
   algo/simd/sph_simd.c \
   algo/simd/simd-hash-2way.c \
+  algo/simd/nist.c \
+  algo/simd/vector.c \
   algo/skein/sph_skein.c \
   algo/skein/skein-hash-4way.c \
   algo/skein/skein.c \
@@ -212,6 +214,10 @@ cpuminer_SOURCES = \
   algo/x11/x11-gate.c \
   algo/x11/x11.c \
   algo/x11/x11-4way.c \
+  algo/x11/x11k-gate.c \
+  algo/x11/x11k.c \
+  algo/x11/adam-gate.c \
+  algo/x11/adam.c \
   algo/x11/x11gost-gate.c \
   algo/x11/x11gost.c \
   algo/x11/x11gost-4way.c \
