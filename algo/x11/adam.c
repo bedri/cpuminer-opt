@@ -564,28 +564,31 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 	// big endian encode 0..18 uint32_t, 64 bits at a time
 	swab32_array(endiandata, pdata, 20);
 
+	uint32_t mask = 0;
 	for (int m = 0; m < 6; m++)
 	{
 		if (Htarg <= htmax[m])
 		{
-			uint32_t mask = masks[m];
-			do
-			{
-				pdata[19] = ++n;
-				le32enc(&endiandata[19], n);
-				adam_base_hash(hash64, &endiandata, cache);
-
-				if ((hash64[7] & mask) == 0)
-				{
-					if (fulltest(hash64, ptarget))
-					{
-						pdata[19] = bswap_32(pdata[19]);
-						submit_solution(work, hash64, mythr);
-					}
-				}
-			} while (n < max_nonce && !work_restart[thr_id].restart);
+			mask = masks[m];
+			break;
 		}
 	}
+
+	do
+	{
+		pdata[19] = ++n;
+		le32enc(&endiandata[19], n);
+		adam_base_hash(hash64, &endiandata, cache);
+
+		if ((hash64[7] & mask) == 0)
+		{
+			if (fulltest(hash64, ptarget))
+			{
+				pdata[19] = bswap_32(pdata[19]);
+				submit_solution(work, hash64, mythr);
+			}
+		}
+	} while (n < max_nonce && !work_restart[thr_id].restart);
 
 	*hashes_done = n - first_nonce + 1;
 	pdata[19] = n;
