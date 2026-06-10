@@ -533,8 +533,10 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 		do {
 			pdata[19] = ++n;
 			adam_hash(hash64, pdata, work->pow_algo ? work->pow_algo : "DoubleSHA256");
-			if (fulltest(hash64, ptarget)) {
-				submit_solution(work, hash64, mythr);
+			if (hash64[7] <= ptarget[7]) {
+				if (fulltest(hash64, ptarget)) {
+					submit_solution(work, hash64, mythr);
+				}
 			}
 		} while (n < max_nonce && !work_restart[thr_id].restart);
 
@@ -582,10 +584,13 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 
 		if ((hash64[7] & mask) == 0)
 		{
-			if (fulltest(hash64, ptarget))
+			if (hash64[7] <= ptarget[7])
 			{
-				pdata[19] = bswap_32(pdata[19]);
-				submit_solution(work, hash64, mythr);
+				if (fulltest(hash64, ptarget))
+				{
+					pdata[19] = bswap_32(pdata[19]);
+					submit_solution(work, hash64, mythr);
+				}
 			}
 		}
 	} while (n < max_nonce && !work_restart[thr_id].restart);
