@@ -1,69 +1,160 @@
 #if !defined(SIMD_INT_H__)
 #define SIMD_INT_H__ 1
 
-///////////////////////////////////
+//TODO compile time test for byte order
+// be64 etc using HW bswap.
 //
-//    Integers up to 128 bits.
-//
-//   These utilities enhance support for integers up to 128 bits.
-//   All standard operations are supported on 128 bit integers except
-//   numeric constant representation and IO. 128 bit integers must be built
-//   and displayed as 2 64 bit halves, just like the old times.
-//
-//   Some utilities are also provided for smaller integers, most notably
-//   bit rotation.   
-
-
-
-// MMX has no extract instruction for 32 bit elements so this:
-// Lo is trivial, high is a simple shift. 
-// Input may be uint64_t or __m64, returns uint32_t.
-#define u64_extr_lo32(a)   ( (uint32_t)( (uint64_t)(a) ) )
-#define u64_extr_hi32(a)   ( (uint32_t)( ((uint64_t)(a)) >> 32)  )
-
-#define u64_extr_32( a, n )  ( (uint32_t)( (a) >> ( ( 2-(n)) <<5 ) ) )
-#define u64_extr_16( a, n )  ( (uint16_t)( (a) >> ( ( 4-(n)) <<4 ) ) )
-#define u64_extr_8(  a, n )  ( (uint8_t) ( (a) >> ( ( 8-(n)) <<3 ) ) )
-
-// Rotate bits in various sized integers.
-#define u64_ror_64( x, c ) \
-      (uint64_t)( ( (uint64_t)(x) >> (c) ) | ( (uint64_t)(x) << (64-(c)) ) )
-#define u64_rol_64( x, c ) \
-      (uint64_t)( ( (uint64_t)(x) << (c) ) | ( (uint64_t)(x) >> (64-(c)) ) )
-#define u32_ror_32( x, c ) \
-      (uint32_t)( ( (uint32_t)(x) >> (c) ) | ( (uint32_t)(x) << (32-(c)) ) )
-#define u32_rol_32( x, c ) \
-      (uint32_t)( ( (uint32_t)(x) << (c) ) | ( (uint32_t)(x) >> (32-(c)) ) )
-#define u16_ror_16( x, c ) \
-      (uint16_t)( ( (uint16_t)(x) >> (c) ) | ( (uint16_t)(x) << (16-(c)) ) )
-#define u16_rol_16( x, c ) \
-      (uint16_t)( ( (uint16_t)(x) << (c) ) | ( (uint16_t)(x) >> (16-(c)) ) )
-#define u8_ror_8( x, c ) \
-      (uint8_t) ( ( (uint8_t) (x) >> (c) ) | ( (uint8_t) (x) << ( 8-(c)) ) )
-#define u8_rol_8( x, c ) \
-      (uint8_t) ( ( (uint8_t) (x) << (c) ) | ( (uint8_t) (x) >> ( 8-(c)) ) )
-
 // Endian byte swap
-#define bswap_64( a ) __builtin_bswap64( a )
-#define bswap_32( a ) __builtin_bswap32( a )
+#if defined(__x86_64__)
 
-// 64 bit mem functions use integral sizes instead of bytes, data must
-// be aligned to 64 bits. Mostly for scaled indexing convenience.
-static inline void memcpy_64( uint64_t *dst, const uint64_t *src, int n )
-{   for ( int i = 0; i < n; i++ ) dst[i] = src[i]; }
+#define bswap_64    __builtin_bswap64
+#define bswap_32    __builtin_bswap32
 
-static inline void memset_zero_64( uint64_t *src, int n )
-{   for ( int i = 0; i < n; i++ ) src[i] = 0ull; }
+#elif defined(__aarch64__)
 
-static inline void memset_64( uint64_t *dst, const uint64_t a,  int n )
-{   for ( int i = 0; i < n; i++ ) dst[i] = a; }
+static inline uint64_t bswap_64( uint64_t a )
+{
+   uint64_t b;
+   asm( "rev %0, %1\n\t" : "=r"(b) : "r"(a) );
+   return b;
+}
+
+// This produces warnings from clang, but its suggested workaround 
+// "rev32 %w0, %w1\n\t" produced errors instead. GCC doesn't complain and
+// it works as is on both.
+static inline uint32_t bswap_32( uint32_t a )
+{
+   uint32_t b;
+   asm( "rev32 %0, %1\n\t" : "=r"(b) : "r"(a) );
+   return b;
+}
+
+#else
+
+#define bswap_64(x) \
+    ( ( ( (x) & 0x00000000FFFFFFFF ) << 32 ) \
+    | ( ( (x) & 0xFFFFFFFF00000000 ) >> 32 ) \
+    | ( ( (x) & 0x0000FFFF0000FFFF ) << 16 ) \
+    | ( ( (x) & 0xFFFF0000FFFF0000 ) >> 16 ) \
+    | ( ( (x) & 0x00FF00FF00FF00FF ) <<  8 ) \
+    | ( ( (x) & 0xFF00FF00FF00FF00 ) >>  8 ) )
+
+#define bswap_32(x) \
+   ( ( ( (x) << 24 ) & 0xff000000 ) | ( ((x) <<  8 ) & 0x00ff0000 ) \
+   | ( ( (x) >>  8 ) & 0x0000ff00 ) | ( ((x) >> 24 ) & 0x000000ff ) )
+
+// Poorman's 2 way parallel SIMD uses u64 to bswap 2 u32
+#define bswap_32x2( u64 ) \
+    ( ( (u64) & 0xff000000ff000000 ) >> 24 ) \
+  | ( ( (u64) & 0x00ff000000ff0000 ) >>  8 ) \
+  | ( ( (u64) & 0x0000ff000000ff00 ) <<  8 ) \
+  | ( ( (u64) & 0x000000ff000000ff ) << 24 ) 
+
+#endif
+
+// 128 bit rotation
+#define bswap_128( x ) \
+    ( (uint128_t)(bswap_64( (uint64_t)(x & 0xffffffffffffffff) ) ) << 64 ); \
+ || ( (uint128_t)(bswap_64( (uint64_t)(x >> 64) ) ) ); \
+    
+
+// Set byte order regardless of host order.
+static inline uint64_t be64( const uint64_t u64 )
+{
+  const uint8_t *p = (uint8_t const *)&u64;
+  return ( ( ( (uint64_t)(p[7])         + ( (uint64_t)(p[6]) <<  8 ) ) +
+           ( ( (uint64_t)(p[5]) << 16 ) + ( (uint64_t)(p[4]) << 24 ) ) ) +
+           ( ( (uint64_t)(p[3]) << 32 ) + ( (uint64_t)(p[2]) << 40 ) ) +
+           ( ( (uint64_t)(p[1]) << 48 ) + ( (uint64_t)(p[0]) << 56 ) ) );
+}
+
+static inline uint64_t le64( const uint64_t u64 )
+{
+  const uint8_t *p = (uint8_t const *)&u64;
+  return ( ( ( (uint64_t)(p[0])         + ( (uint64_t)(p[1]) <<  8 ) ) +
+           ( ( (uint64_t)(p[2]) << 16 ) + ( (uint64_t)(p[3]) << 24 ) ) ) +
+           ( ( (uint64_t)(p[3]) << 32 ) + ( (uint64_t)(p[1]) << 40 ) ) +
+           ( ( (uint64_t)(p[2]) << 48 ) + ( (uint64_t)(p[3]) << 56 ) ) );
+}
+
+static inline uint32_t be32( const uint32_t u32 )
+{
+  const uint8_t *p = (uint8_t const *)&u32;
+  return ( ( (uint32_t)(p[3])         + ( (uint32_t)(p[2]) <<  8 ) ) +
+         ( ( (uint32_t)(p[1]) << 16 ) + ( (uint32_t)(p[0]) << 24 ) ) );
+}
+
+static inline uint32_t le32( const uint32_t u32 )
+{
+   const uint8_t *p = (uint8_t const *)&u32;
+   return ( ( (uint32_t)(p[0])        + ( (uint32_t)(p[1]) <<  8 ) ) +
+          ( ( (uint32_t)(p[2]) << 16) + ( (uint32_t)(p[3]) << 24 ) ) );
+}
+
+static inline uint16_t be16( const uint16_t u16 )
+{
+  const uint8_t *p = (uint8_t const *)&u16;
+  return ( (uint16_t)(p[3]) ) + ( (uint16_t)(p[2]) <<  8 );
+}
+
+static inline uint32_t le16( const uint16_t u16 )
+{
+   const uint8_t *p = (uint8_t const *)&u16;
+   return ( (uint16_t)(p[0]) ) + ( (uint16_t)(p[1]) <<  8 );
+}
+
+// Bit rotation
+#if defined(__x86_64__)
+
+#define rol64       __rolq
+#define ror64       __rorq
+#define rol32       __rold
+#define ror32       __rord
+
+/*  these don't seem to work
+#elif defined(__aarch64__)
+
+// Documentation is vague, ror exists but is ambiguous. Docs say it can
+// do 32 or 64 bit registers. Assuming that is architecture specific and can
+// only do 32 bit on 32 bit arch. Rarely used so not a big issue.
+static inline uint64_t ror64( uint64_t a, const int c )
+{
+   uint64_t b;
+   asm( "ror %0, %1, %2\n\t" : "=r"(b) : "r"(a), "r"(c) );
+   return b;
+}
+#define rol64( a, c )     ror64( a, 64-(c) )
+
+static inline uint32_t ror32( uint32_t a, const int c )
+{
+   uint32_t b;
+   asm( "ror %0, %1, %2\n\t" : "=r"(b) : "r"(a), "r"(c) );
+   return b;
+}
+#define rol32( a, c )     ror32( a, 32-(c) )
+*/
+
+#else
+
+#define ror64( x, c )    ( ( (x) >> (c) ) | ( (x) << (64-(c)) ) )
+#define rol64( x, c )    ( ( (x) << (c) ) | ( (x) >> (64-(c)) ) )
+#define ror32( x, c )    ( ( (x) >> (c) ) | ( (x) << (32-(c)) ) )
+#define rol32( x, c )    ( ( (x) << (c) ) | ( (x) >> (32-(c)) ) )
+
+#endif
+
+// Safe division, integer or floating point. For floating point it's as  
+// safe as 0 is precisely zero.
+// Returns safe_result if division by zero, typically zero.
+#define safe_div( dividend, divisor, safe_result ) \
+   ( (divisor) == 0 ? safe_result : ( (dividend) / (divisor) )  )
 
 
 ///////////////////////////////////////
 // 
 //      128 bit integers
 //
-//  128 bit integers are inneficient and not a shortcut for __m128i.
+// 128 bit integers are inneficient and not a shortcut for __m128i.
 // Native type __int128 supported starting with GCC-4.8.
 //
 // __int128 uses two 64 bit GPRs to hold the data. The main benefits are
@@ -78,11 +169,12 @@ static inline void memset_64( uint64_t *dst, const uint64_t a,  int n )
 // __m256i v256 = _mm256_set_m128i( (__m128i)my_int128, (__m128i)my_int128 );
 // my_int128 = (uint128_t)_mm256_extracti128_si256( v256, 1 );
 
+// obsolete test
 // Compiler check for __int128 support
 // Configure also has a test for int128.
-#if ( __GNUC__ > 4 ) || ( ( __GNUC__ == 4 ) && ( __GNUC_MINOR__ >= 8 ) )
+//#if ( __GNUC__ > 4 ) || ( ( __GNUC__ == 4 ) && ( __GNUC_MINOR__ >= 8 ) )
   #define GCC_INT128 1
-#endif
+//#endif
 
 #if !defined(GCC_INT128)
   #warning "__int128 not supported, requires GCC-4.8 or newer."
@@ -94,30 +186,18 @@ static inline void memset_64( uint64_t *dst, const uint64_t a,  int n )
 typedef          __int128  int128_t;
 typedef unsigned __int128 uint128_t;
 
-
-
-// Maybe usefull for making constants.
-#define mk_uint128( hi, lo ) \
-   ( ( (uint128_t)(hi) << 64 ) | ( (uint128_t)(lo) ) )
-
+typedef union
+{
+   uint128_t u128;
+   uint64_t  u64[2];
+   uint32_t  u32[4];
+} __attribute__ ((aligned (16))) u128_ovly;
 
 // Extracting the low bits is a trivial cast.
 // These specialized functions are optimized while providing a
 // consistent interface.
 #define u128_hi64( x )    ( (uint64_t)( (uint128_t)(x) >> 64 ) )
 #define u128_lo64( x )    ( (uint64_t)(x) )
-
-// Generic extract, don't use for extracting low bits, cast instead.
-#define u128_extr_64( a, n )  ( (uint64_t)( (a) >> ( ( 2-(n)) <<6 ) ) )
-#define u128_extr_32( a, n )  ( (uint32_t)( (a) >> ( ( 4-(n)) <<5 ) ) )
-#define u128_extr_16( a, n )  ( (uint16_t)( (a) >> ( ( 8-(n)) <<4 ) ) )
-#define u128_extr_8(  a, n )  ( (uint8_t) ( (a) >> ( (16-(n)) <<3 ) ) )
-
-// Not much need for this but it fills a gap.
-#define u128_ror_128( x, c ) \
-       ( ( (uint128_t)(x) >> (c) ) | ( (uint128_t)(x) << (128-(c)) ) )
-#define u128_rol_128( x, c ) \
-       ( ( (uint128_t)(x) << (c) ) | ( (uint128_t)(x) >> (128-(c)) ) )
 
 #endif  // GCC_INT128
 

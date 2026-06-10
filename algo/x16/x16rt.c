@@ -1,6 +1,6 @@
 #include "x16r-gate.h"
 
-#if !defined(X16R_8WAY) && !defined(X16R_4WAY)
+#if !defined(X16RT_8WAY) && !defined(X16RT_4WAY)
 
 int scanhash_x16rt( struct work *work, uint32_t max_nonce,
                     uint64_t *hashes_done, struct thr_info *mythr )
@@ -17,21 +17,21 @@ int scanhash_x16rt( struct work *work, uint32_t max_nonce,
    const bool bench = opt_benchmark;
    if ( bench )  ptarget[7] = 0x0cff;
 
-   mm128_bswap32_80( edata, pdata );
+   v128_bswap32_80( edata, pdata );
 
    static __thread uint32_t s_ntime = UINT32_MAX;
-   uint32_t ntime = swab32( pdata[17] );
-   if ( s_ntime != ntime )
+   uint32_t masked_ntime = bswap_32( pdata[17] ) & 0xffffff80;
+   if ( s_ntime != masked_ntime )
    {
-      x16rt_getTimeHash( ntime, &timeHash );
+      x16rt_getTimeHash( masked_ntime, &timeHash );
       x16rt_getAlgoString( &timeHash[0], x16r_hash_order );
-      s_ntime = ntime;
-      if ( opt_debug && !thr_id )
+      s_ntime = masked_ntime;
+      if ( !thr_id )
           applog( LOG_INFO, "hash order: %s time: (%08x) time hash: (%08x)",
-                               x16r_hash_order, ntime, timeHash );
+                        x16r_hash_order, bswap_32( pdata[17] ), timeHash );
    }
    
-   x16r_prehash( edata, pdata );
+   x16r_prehash( edata, pdata, x16r_hash_order );
    
    do
    {

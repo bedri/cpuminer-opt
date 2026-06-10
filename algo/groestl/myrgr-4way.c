@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "aes_ni/hash-groestl.h"
-#include "algo/sha/sha-hash-4way.h"
+#include "algo/sha/sha256-hash.h"
 #if defined(__VAES__)
   #include "groestl512-hash-4way.h"
 #endif
@@ -17,7 +17,7 @@ typedef struct {
 #else
    hashState_groestl       groestl;
 #endif
-   sha256_8way_context     sha;
+   sha256_8x32_context     sha;
 } myrgr_8way_ctx_holder;
 
 myrgr_8way_ctx_holder myrgr_8way_ctx;
@@ -29,7 +29,7 @@ void init_myrgr_8way_ctx()
 #else
      init_groestl( &myrgr_8way_ctx.groestl, 64 );
 #endif
-     sha256_8way_init( &myrgr_8way_ctx.sha );
+     sha256_8x32_init( &myrgr_8way_ctx.sha );
 }
 
 void myriad_8way_hash( void *output, const void *input )
@@ -44,6 +44,7 @@ void myriad_8way_hash( void *output, const void *input )
 
      rintrlv_8x64_4x128( vhashA, vhashB, input, 640 );
      groestl512_4way_update_close( &ctx.groestl, vhashA, vhashA, 640 );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(groestl512_4way_context) );
      groestl512_4way_update_close( &ctx.groestl, vhashB, vhashB, 640 );
 
      uint32_t hash0[20] __attribute__ ((aligned (64)));
@@ -58,8 +59,6 @@ void myriad_8way_hash( void *output, const void *input )
 //     rintrlv_4x128_8x32( vhash, vhashA, vhashB, 512 );
      dintrlv_4x128_512( hash0, hash1, hash2, hash3, vhashA );
      dintrlv_4x128_512( hash4, hash5, hash6, hash7, vhashB );
-     intrlv_8x32_512( vhash, hash0, hash1, hash2, hash3, hash4, hash5,
-                       hash6, hash7 );
 
 #else
 
@@ -76,29 +75,29 @@ void myriad_8way_hash( void *output, const void *input )
                    hash4, hash5, hash6, hash7, input, 640 );
 
      update_and_final_groestl( &ctx.groestl, (char*)hash0, (char*)hash0, 640 );
-     memcpy( &ctx.groestl, &myrgr_4way_ctx.groestl, sizeof(hashState_groestl) );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(hashState_groestl) );
      update_and_final_groestl( &ctx.groestl, (char*)hash1, (char*)hash1, 640 );
-     memcpy( &ctx.groestl, &myrgr_4way_ctx.groestl, sizeof(hashState_groestl) );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(hashState_groestl) );
      update_and_final_groestl( &ctx.groestl, (char*)hash2, (char*)hash2, 640 );
-     memcpy( &ctx.groestl, &myrgr_4way_ctx.groestl, sizeof(hashState_groestl) );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(hashState_groestl) );
      update_and_final_groestl( &ctx.groestl, (char*)hash3, (char*)hash3, 640 );
-     memcpy( &ctx.groestl, &myrgr_4way_ctx.groestl, sizeof(hashState_groestl) );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(hashState_groestl) );
      update_and_final_groestl( &ctx.groestl, (char*)hash4, (char*)hash4, 640 );
-     memcpy( &ctx.groestl, &myrgr_4way_ctx.groestl, sizeof(hashState_groestl) );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(hashState_groestl) );
      update_and_final_groestl( &ctx.groestl, (char*)hash5, (char*)hash5, 640 );
-     memcpy( &ctx.groestl, &myrgr_4way_ctx.groestl, sizeof(hashState_groestl) );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(hashState_groestl) );
      update_and_final_groestl( &ctx.groestl, (char*)hash6, (char*)hash6, 640 );
-     memcpy( &ctx.groestl, &myrgr_4way_ctx.groestl, sizeof(hashState_groestl) );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(hashState_groestl) );
      update_and_final_groestl( &ctx.groestl, (char*)hash7, (char*)hash7, 640 );
-     memcpy( &ctx.groestl, &myrgr_4way_ctx.groestl, sizeof(hashState_groestl) );
-
-     intrlv_8x32( vhash, hash0, hash1, hash2, hash3,
-                         hash4, hash5, hash6, hash7, 512 );
+     memcpy( &ctx.groestl, &myrgr_8way_ctx.groestl, sizeof(hashState_groestl) );
 
 #endif
 
-     sha256_8way_update( &ctx.sha, vhash, 64 );
-     sha256_8way_close( &ctx.sha, output );
+     intrlv_8x32_512( vhash, hash0, hash1, hash2, hash3, hash4, hash5,
+                       hash6, hash7 );
+     
+     sha256_8x32_update( &ctx.sha, vhash, 64 );
+     sha256_8x32_close( &ctx.sha, output );
 }
 
 int scanhash_myriad_8way( struct work *work, uint32_t max_nonce,
@@ -157,7 +156,7 @@ int scanhash_myriad_8way( struct work *work, uint32_t max_nonce,
 
 typedef struct {
     hashState_groestl       groestl;
-    sha256_4way_context     sha;
+    sha256_4x32_context     sha;
 } myrgr_4way_ctx_holder;
 
 myrgr_4way_ctx_holder myrgr_4way_ctx;
@@ -165,7 +164,7 @@ myrgr_4way_ctx_holder myrgr_4way_ctx;
 void init_myrgr_4way_ctx()
 {
      init_groestl (&myrgr_4way_ctx.groestl, 64 );
-     sha256_4way_init( &myrgr_4way_ctx.sha );
+     sha256_4x32_init( &myrgr_4way_ctx.sha );
 }
 
 void myriad_4way_hash( void *output, const void *input )
@@ -190,8 +189,8 @@ void myriad_4way_hash( void *output, const void *input )
 
      intrlv_4x32( vhash, hash0, hash1, hash2, hash3, 512 );
 
-     sha256_4way_update( &ctx.sha, vhash, 64 );
-     sha256_4way_close( &ctx.sha, output );
+     sha256_4x32_update( &ctx.sha, vhash, 64 );
+     sha256_4x32_close( &ctx.sha, output );
 }
 
 int scanhash_myriad_4way( struct work *work, uint32_t max_nonce,
@@ -212,9 +211,9 @@ int scanhash_myriad_4way( struct work *work, uint32_t max_nonce,
    if ( opt_benchmark )
       ( (uint32_t*)ptarget )[7] = 0x0000ff;
 
-   mm128_bswap32_intrlv80_4x32( vdata, pdata );
+   v128_bswap32_intrlv80_4x32( vdata, pdata );
    do {
-      *noncev = mm128_bswap_32( _mm_set_epi32( n+3,n+2,n+1,n ) );
+      *noncev = v128_bswap32( _mm_set_epi32( n+3,n+2,n+1,n ) );
 
       myriad_4way_hash( hash, vdata );
       pdata[19] = n;

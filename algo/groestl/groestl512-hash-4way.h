@@ -2,7 +2,6 @@
 #define GROESTL512_HASH_4WAY_H__ 1
 
 #include "simd-utils.h"
-#include <immintrin.h>
 #include <stdint.h>
 #include <stdio.h>
 #if defined(_WIN64) || defined(__WINDOWS__)
@@ -10,9 +9,7 @@
 #endif
 #include <stdlib.h>
 
-#if defined(__VAES__) && defined(__AVX512F__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512BW__)
-
-#define LENGTH (512)
+#if defined(__AVX2__) && defined(__VAES__)
 
 /* some sizes (number of bytes) */
 #define ROWS (8)
@@ -36,19 +33,18 @@
 
 #define SIZE512 (SIZE_1024/16)
 
+#if defined(SIMD512)
+
 typedef struct {
   __attribute__ ((aligned (128))) __m512i chaining[SIZE512];
   __attribute__ ((aligned (64))) __m512i buffer[SIZE512];
   int blk_count;     // SIZE_m128i
   int buf_ptr;       // __m128i offset
   int rem_ptr;
-  int databitlen;    // bits
 } groestl512_4way_context;
 
 
 int groestl512_4way_init( groestl512_4way_context*, uint64_t );
-
-//int reinit_groestl( hashState_groestl* );
 
 int groestl512_4way_update( groestl512_4way_context*, const void*,
                               uint64_t );
@@ -57,6 +53,30 @@ int groestl512_4way_update_close( groestl512_4way_context*,  void*,
                                         const void*, uint64_t );
 int groestl512_4way_full( groestl512_4way_context*,  void*,
                           const void*, uint64_t );
+
+#endif   // AVX512
+
+// AVX2 + VAES
+
+typedef struct {
+  __attribute__ ((aligned (128))) __m256i chaining[SIZE512];
+  __attribute__ ((aligned (64))) __m256i buffer[SIZE512];
+  int blk_count;     // SIZE_m128i
+  int buf_ptr;       // __m128i offset
+  int rem_ptr;
+} groestl512_2way_context;
+
+
+int groestl512_2way_init( groestl512_2way_context*, uint64_t );
+
+int groestl512_2way_update( groestl512_2way_context*, const void*,
+                              uint64_t );
+int groestl512_2way_close( groestl512_2way_context*, void* );
+int groestl512_2way_update_close( groestl512_2way_context*,  void*,
+                                        const void*, uint64_t );
+int groestl512_2way_full( groestl512_2way_context*,  void*,
+                          const void*, uint64_t );
+
 
 #endif   // VAES
 #endif   // GROESTL512_HASH_4WAY_H__

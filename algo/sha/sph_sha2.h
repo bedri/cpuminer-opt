@@ -41,7 +41,7 @@
 #define SPH_SHA2_H__
 
 #include <stddef.h>
-#include "sph_types.h"
+#include "compat/sph_types.h"
 
 /**
  * Output size (in bits) for SHA-224.
@@ -73,7 +73,7 @@ typedef struct {
 	sph_u32 count_high, count_low;
 #endif
 #endif
-} sph_sha224_context;
+} sph_sha224_context __attribute__((aligned(64)));
 
 /**
  * This structure is a context for SHA-256 computations. It is identical
@@ -204,6 +204,20 @@ void sph_sha256_comp(const sph_u32 msg[16], sph_u32 val[8]);
 #ifndef DOXYGEN_IGNORE
 #define sph_sha256_comp   sph_sha224_comp
 #endif
+
+void sph_sha256_full( void *dst, const void *data, size_t len );
+
+// These shouldn't be called directly, use sha256-hash.h generic functions
+// sha256_transform_le & sha256_transform_be instead.
+void sph_sha256_transform_le( uint32_t *state_out, const uint32_t *data,
+                              const uint32_t *state_in );
+
+void sph_sha256_transform_be( uint32_t *state_out, const uint32_t *data,
+                              const uint32_t *state_in );
+
+void sph_sha256_prehash_3rounds( uint32_t *state_out, const uint32_t *data,
+                                 const uint32_t *state_in );
+
 
 #if SPH_64
 

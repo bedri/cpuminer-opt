@@ -7,28 +7,24 @@
 #include <string.h>
 #include <stdio.h>
 #include "sph_ripemd.h"
-#include <openssl/sha.h>
+#include "algo/sha/sha256-hash.h"
+#include "algo/sha/sha512-hash.h"
 
 void lbry_hash(void* output, const void* input)
 {
-   SHA256_CTX              ctx_sha256 __attribute__ ((aligned (64)));
-   SHA512_CTX              ctx_sha512 __attribute__ ((aligned (64)));
-   sph_ripemd160_context   ctx_ripemd __attribute__ ((aligned (64)));
+   sha256_context        ctx_sha256 __attribute__ ((aligned (64)));
+   sph_sha512_context    ctx_sha512 __attribute__ ((aligned (64)));
+   sph_ripemd160_context ctx_ripemd __attribute__ ((aligned (64)));
    uint32_t _ALIGN(64) hashA[16];
    uint32_t _ALIGN(64) hashB[16];
    uint32_t _ALIGN(64) hashC[16];
 
-   SHA256_Init( &ctx_sha256 );
-   SHA256_Update( &ctx_sha256, input, 112 );
-   SHA256_Final( (unsigned char*) hashA, &ctx_sha256 );
+   sha256_full( hashA, input, 112 );
+   sha256_full( hashA, hashA, 32 );
 
-   SHA256_Init( &ctx_sha256 );
-   SHA256_Update( &ctx_sha256, hashA, 32 );
-   SHA256_Final( (unsigned char*) hashA, &ctx_sha256 );
-
-   SHA512_Init( &ctx_sha512 );
-   SHA512_Update( &ctx_sha512, hashA, 32 );
-   SHA512_Final( (unsigned char*) hashA, &ctx_sha512 );
+   sph_sha512_init( &ctx_sha512 );
+   sph_sha512( &ctx_sha512, hashA, 32 );
+   sph_sha512_close( &ctx_sha512, hashA );
 
    sph_ripemd160_init( &ctx_ripemd );
    sph_ripemd160 ( &ctx_ripemd, hashA, 32 );
@@ -38,15 +34,13 @@ void lbry_hash(void* output, const void* input)
    sph_ripemd160 ( &ctx_ripemd, hashA+8, 32 );
    sph_ripemd160_close( &ctx_ripemd, hashC );
 
-   SHA256_Init( &ctx_sha256 );
-   SHA256_Update( &ctx_sha256, hashB, 20 );
-   SHA256_Update( &ctx_sha256, hashC, 20 );
-   SHA256_Final( (unsigned char*) hashA, &ctx_sha256 );
+   sha256_ctx_init( &ctx_sha256 );
+   sha256_update( &ctx_sha256, hashB, 20 );
+   sha256_update( &ctx_sha256, hashC, 20 );
+   sha256_final( &ctx_sha256, hashA );
 
-   SHA256_Init( &ctx_sha256 );
-   SHA256_Update( &ctx_sha256, hashA, 32 );
-   SHA256_Final( (unsigned char*) hashA, &ctx_sha256 );
-
+   sha256_full( hashA, hashA, 32 );
+   
    memcpy( output, hashA, 32 );
 }
 

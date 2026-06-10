@@ -14,16 +14,16 @@
 #include "algo/skein/sph_skein.h"
 #include "algo/shavite/sph_shavite.h"
 #include "algo/hamsi/sph_hamsi.h"
-#include "algo/fugue/sph_fugue.h"
 #include "algo/cubehash/cubehash_sse2.h"
-#include "algo/simd/nist.h"
-
+#include "algo/simd/simd-hash-2way.h"
 #if defined(__AES__)
   #include "algo/echo/aes_ni/hash_api.h"
   #include "algo/groestl/aes_ni/hash-groestl.h"
+  #include "algo/fugue/fugue-aesni.h"
 #else
   #include "algo/groestl/sph_groestl.h"
   #include "algo/echo/sph_echo.h"
+  #include "algo/fugue/sph_fugue.h"
 #endif
 
 typedef struct {
@@ -32,18 +32,19 @@ typedef struct {
 #if defined(__AES__)
    hashState_echo          echo;
    hashState_groestl       groestl;
+   hashState_fugue         fugue;
 #else
    sph_groestl512_context   groestl;
    sph_echo512_context      echo;
+   sph_fugue512_context    fugue;
 #endif
    sph_jh512_context       jh;
    sph_keccak512_context   keccak;
    sph_skein512_context    skein;
    cubehashParam           cube;
    sph_shavite512_context  shavite;
-   hashState_sd            simd;
+   simd512_context         simd;
    sph_hamsi512_context    hamsi;
-   sph_fugue512_context    fugue;
    sm3_ctx_t               sm3;
 } x13bcd_ctx_holder;
 
@@ -56,19 +57,19 @@ void init_x13bcd_ctx()
 #if defined(__AES__)
    init_groestl( &x13bcd_ctx.groestl, 64 );
    init_echo( &x13bcd_ctx.echo, 512 );
+   fugue512_Init( &x13bcd_ctx.fugue, 512 );
 #else
    sph_groestl512_init( &x13bcd_ctx.groestl );
    sph_echo512_init( &x13bcd_ctx.echo );
+   sph_fugue512_init( &x13bcd_ctx.fugue );
 #endif
    sph_skein512_init( &x13bcd_ctx.skein );
    sph_jh512_init( &x13bcd_ctx.jh );
    sph_keccak512_init( &x13bcd_ctx.keccak );
    cubehashInit( &x13bcd_ctx.cube,512,16,32 );
    sph_shavite512_init( &x13bcd_ctx.shavite );
-   init_sd( &x13bcd_ctx.simd,512 );
    sm3_init( &x13bcd_ctx.sm3 );
    sph_hamsi512_init( &x13bcd_ctx.hamsi );
-   sph_fugue512_init( &x13bcd_ctx.fugue );
 };
 
 void x13bcd_hash(void *output, const void *input)
@@ -108,15 +109,12 @@ void x13bcd_hash(void *output, const void *input)
     sph_sm3(&ctx.sm3, hash, 64);
     sph_sm3_close(&ctx.sm3, sm3_hash);
 
-    cubehashUpdateDigest( &ctx.cube, (byte*) hash,
-                            (const byte*)sm3_hash, 64 );
-
+    cubehashUpdateDigest( &ctx.cube, hash, sm3_hash, 64 );
 
     sph_shavite512( &ctx.shavite, hash, 64);
     sph_shavite512_close( &ctx.shavite, hash);
 
-    update_final_sd( &ctx.simd, (BitSequence *)hash,
-                          (const BitSequence *)hash, 512 );
+    simd512_ctx( &ctx.simd, hash, hash, 64 );
 
 #if defined(__AES__)
     update_final_echo ( &ctx.echo, (BitSequence *)hash,
@@ -129,8 +127,13 @@ void x13bcd_hash(void *output, const void *input)
     sph_hamsi512( &ctx.hamsi, hash, 64 );
     sph_hamsi512_close( &ctx.hamsi, hash );
 
+#if defined(__AES__)
+    fugue512_Update( &ctx.fugue, hash, 512 );
+    fugue512_Final( &ctx.fugue, hash );
+#else
     sph_fugue512( &ctx.fugue, hash, 64 );
     sph_fugue512_close( &ctx.fugue, hash );
+#endif
 
     memcpy( output, hash, 32 );
 }

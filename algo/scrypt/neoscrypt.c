@@ -46,7 +46,7 @@
 #endif
 
 #ifdef __GNUC__
-#if defined(NOASM) || defined(__arm__)
+#if defined(NOASM) || defined(__arm__) || defined(__aarch64__) || defined(__APPLE__)
 #define ASM 0
 #else
 #define ASM 1
@@ -69,8 +69,12 @@ typedef unsigned int  uint;
 #define SCRYPT_HASH_BLOCK_SIZE 64U
 #define SCRYPT_HASH_DIGEST_SIZE 32U
 
-#define ROTL32(a,b) (((a) << (b)) | ((a) >> (32 - b)))
-#define ROTR32(a,b) (((a) >> (b)) | ((a) << (32 - b)))
+//#define ROTL32(a,b) (((a) << (b)) | ((a) >> (32 - b)))
+//#define ROTR32(a,b) (((a) >> (b)) | ((a) << (32 - b)))
+
+#define ROTL32(a,b) rol32(a,b)
+#define ROTR32(a,b) ror32(a,b)
+
 
 #define U8TO32_BE(p) \
     (((uint32_t)((p)[0]) << 24) | ((uint32_t)((p)[1]) << 16) | \
@@ -593,6 +597,45 @@ static void blake2s_compress(blake2s_state *S, const void *buf) {
     v[13] = S->t[1] ^ blake2s_IV[5];
     v[14] = S->f[0] ^ blake2s_IV[6];
     v[15] = S->f[1] ^ blake2s_IV[7];
+
+#if defined(__SSE2__) || defined(__ARM_NEON)
+
+   v128_t *V = (v128_t*)v;
+
+#define ROUND( r ) \
+   V[0] = v128_add32( V[0], v128_add32( V[1], v128_set32( \
+                  m[blake2s_sigma[r][ 6]], m[blake2s_sigma[r][ 4]], \
+                  m[blake2s_sigma[r][ 2]], m[blake2s_sigma[r][ 0]] ) ) ); \
+   V[3] = v128_ror32( v128_xor( V[3], V[0] ), 16 ); \
+   V[2] = v128_add32( V[2], V[3] ); \
+   V[1] = v128_ror32( v128_xor( V[1], V[2] ), 12 ); \
+   V[0] = v128_add32( V[0], v128_add32( V[1], v128_set32( \
+                   m[blake2s_sigma[r][ 7]], m[blake2s_sigma[r][ 5]], \
+                   m[blake2s_sigma[r][ 3]], m[blake2s_sigma[r][ 1]] ) ) ); \
+   V[3] = v128_ror32( v128_xor( V[3], V[0] ), 8 ); \
+   V[2] = v128_add32( V[2], V[3] ); \
+   V[1] = v128_ror32( v128_xor( V[1], V[2] ), 7 ); \
+   V[0] = v128_shufll32( V[0] ); \
+   V[3] = v128_swap64( V[3] ); \
+   V[2] = v128_shuflr32( V[2] ); \
+   V[0] = v128_add32( V[0], v128_add32( V[1], v128_set32( \
+                    m[blake2s_sigma[r][12]], m[blake2s_sigma[r][10]], \
+                    m[blake2s_sigma[r][ 8]], m[blake2s_sigma[r][14]] ) ) ); \
+   V[3] = v128_ror32( v128_xor( V[3], V[0] ), 16 ); \
+   V[2] = v128_add32( V[2], V[3] ); \
+   V[1] = v128_ror32( v128_xor( V[1], V[2] ), 12 ); \
+   V[0] = v128_add32( V[0], v128_add32( V[1], v128_set32( \
+                    m[blake2s_sigma[r][13]], m[blake2s_sigma[r][11]], \
+                    m[blake2s_sigma[r][ 9]], m[blake2s_sigma[r][15]] ) ) ); \
+   V[3] = v128_ror32( v128_xor( V[3], V[0] ), 8 ); \
+   V[2] = v128_add32( V[2], V[3] ); \
+   V[1] = v128_ror32( v128_xor( V[1], V[2] ), 7 ); \
+   V[0] = v128_shuflr32( V[0] ); \
+   V[3] = v128_swap64( V[3] ); \
+   V[2] = v128_shufll32( V[2] )
+
+#else
+
 #define G(r,i,a,b,c,d) \
   do { \
     a = a + b + m[blake2s_sigma[r][2*i+0]]; \
@@ -615,6 +658,9 @@ static void blake2s_compress(blake2s_state *S, const void *buf) {
     G(r, 6, v[ 2], v[ 7], v[ 8], v[13]); \
     G(r, 7, v[ 3], v[ 4], v[ 9], v[14]); \
   } while(0)
+
+#endif
+
     ROUND(0);
     ROUND(1);
     ROUND(2);
@@ -1051,16 +1097,16 @@ int scanhash_neoscrypt( struct work *work,
     uint32_t _ALIGN(64) hash[8];
     const uint32_t Htarg = ptarget[7];
     const uint32_t first_nonce = pdata[19];
-    int thr_id = mythr->id;  // thr_id arg is deprecated
+    int thr_id = mythr->id; 
 
     while (pdata[19] < max_nonce && !work_restart[thr_id].restart)
     {
         neoscrypt((uint8_t *) hash, (uint8_t *) pdata );
 
         /* Quick hash check */
-        if (hash[7] <= Htarg && fulltest_le(hash, ptarget)) {
-            *hashes_done = pdata[19] - first_nonce + 1;
-            return 1;
+        if (hash[7] <= Htarg && fulltest_le(hash, ptarget))
+        {
+          submit_solution( work, hash, mythr );
         }
 
         pdata[19]++;

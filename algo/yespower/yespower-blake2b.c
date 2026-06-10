@@ -95,7 +95,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "crypto/blake2b-yp.h"
+#include "crypto/hmac-blake2b.h"
 #include "yespower.h"
 
 #ifdef __unix__
@@ -259,15 +259,24 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 #define WRITE_X(out) \
     (out).q[0] = X0; (out).q[1] = X1; (out).q[2] = X2; (out).q[3] = X3;
 
-#ifdef __XOP__
+#if defined(VL256)
+
+#define ARX(out, in1, in2, s) \
+   out = _mm_xor_si128(out, _mm_rol_epi32(_mm_add_epi32(in1, in2), s));
+
+#elif defined(__XOP__)
+
 #define ARX(out, in1, in2, s) \
     out = _mm_xor_si128(out, _mm_roti_epi32(_mm_add_epi32(in1, in2), s));
+
 #else
+
 #define ARX(out, in1, in2, s) { \
     __m128i tmp = _mm_add_epi32(in1, in2); \
     out = _mm_xor_si128(out, _mm_slli_epi32(tmp, s)); \
     out = _mm_xor_si128(out, _mm_srli_epi32(tmp, 32 - s)); \
 }
+
 #endif
 
 #define SALSA20_2ROUNDS \
@@ -1127,6 +1136,7 @@ int yespower_b2b(yespower_local_t *local,
     salsa20_blk_t *V, *XY;
     pwxform_ctx_t ctx;
     uint8_t init_hash[32];
+    sph_blake2b_ctx blake2b_ctx;
 
     /* Sanity-check parameters */
     if ((N < 1024 || N > 512 * 1024 || r < 8 || r > 32 ||
@@ -1158,7 +1168,9 @@ int yespower_b2b(yespower_local_t *local,
     ctx.S0 = S;
     ctx.S1 = S + Swidth_to_Sbytes1(Swidth);
 
-    blake2b_yp_hash(init_hash, src, srclen);
+    sph_blake2b_init( &blake2b_ctx, 32, NULL, 0 );
+    sph_blake2b_update( &blake2b_ctx, src, srclen );
+    sph_blake2b_final( &blake2b_ctx, init_hash );
 
     ctx.S2 = S + 2 * Swidth_to_Sbytes1(Swidth);
     ctx.w = 0;
@@ -1172,7 +1184,7 @@ int yespower_b2b(yespower_local_t *local,
 
     if ( work_restart[thrid].restart ) return false;
     
-    pbkdf2_blake2b_yp(init_hash, sizeof(init_hash), src, srclen, 1, B, 128);
+    pbkdf2_blake2b(init_hash, sizeof(init_hash), src, srclen, 1, B, 128);
 
     if ( work_restart[thrid].restart ) return false;
 
@@ -1181,7 +1193,7 @@ int yespower_b2b(yespower_local_t *local,
 
     if ( work_restart[thrid].restart ) return false;
 
-    hmac_blake2b_yp_hash((uint8_t *)dst, B + B_size - 64, 64, init_hash, sizeof(init_hash));
+    hmac_blake2b_hash((uint8_t *)dst, B + B_size - 64, 64, init_hash, sizeof(init_hash));
 
     /* Success! */
     return 1;

@@ -1,6 +1,6 @@
 /*-
  * Copyright 2005,2007,2009 Colin Percival
- * Copyright 2020 JayDDee@gmailcom
+ * Copyright 2020 JayDDee246@gmailcom
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,12 +36,14 @@
 #include <sys/types.h>
 #include <stdint.h>
 #include "simd-utils.h"
-#include "sha-hash-4way.h"
+#include "sha256-hash.h"
+
+#if defined(__SSE2__) || defined(__ARM_NEON)
 
 typedef struct _hmac_sha256_4way_context
 {
-   sha256_4way_context ictx;
-   sha256_4way_context octx;
+   sha256_4x32_context ictx;
+   sha256_4x32_context octx;
 } hmac_sha256_4way_context;
 
 //void SHA256_Buf( const void *, size_t len, uint8_t digest[32] );
@@ -60,12 +62,14 @@ void hmac_sha256_4way_full( void*, const void *, size_t Klen, const void *,
 void pbkdf2_sha256_4way( uint8_t *, size_t, const uint8_t *, size_t,
                          const uint8_t *, size_t, uint64_t );
 
+#endif
+
 #if defined(__AVX2__)
 
 typedef struct _hmac_sha256_8way_context
 {
-   sha256_8way_context ictx;
-   sha256_8way_context octx;
+   sha256_8x32_context ictx;
+   sha256_8x32_context octx;
 } hmac_sha256_8way_context;
 
 //void SHA256_Buf( const void *, size_t len, uint8_t digest[32] );
@@ -78,13 +82,15 @@ void hmac_sha256_8way_full( void*, const void *, size_t Klen, const void *,
 
 void pbkdf2_sha256_8way( uint8_t *, size_t, const uint8_t *, size_t,
                         const uint8_t *, size_t, uint64_t );
-      
-#if defined(__AVX512F__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512BW__)
+
+#endif  // AVX2
+       
+#if defined(SIMD512)
 
 typedef struct _hmac_sha256_16way_context
 {
-   sha256_16way_context ictx;
-   sha256_16way_context octx;
+   sha256_16x32_context ictx;
+   sha256_16x32_context octx;
 } hmac_sha256_16way_context;
 
 //void SHA256_Buf( const void *, size_t len, uint8_t digest[32] );
@@ -100,8 +106,6 @@ void pbkdf2_sha256_16way( uint8_t *, size_t, const uint8_t *, size_t,
                           const uint8_t *, size_t, uint64_t );
 
 
-
 #endif   // AVX512
-#endif   // AVX2
 
 #endif // HMAC_SHA256_4WAY_H__

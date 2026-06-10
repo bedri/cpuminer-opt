@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include "algo/skein/skein-hash-4way.h"
 #include "algo/gost/sph_gost.h"
-#include "algo/fugue/sph_fugue.h"
+#include "algo/fugue/fugue-aesni.h"
 #include "algo/cubehash/cubehash_sse2.h"
 #include "algo/cubehash/cube-hash-2way.h"
 
@@ -14,7 +14,7 @@
 typedef struct {
     skein512_8way_context skein;
     cube_4way_context     cube;
-    sph_fugue512_context  fugue;
+    hashState_fugue         fugue;
     sph_gost512_context   gost;
 } skunk_8way_ctx_holder;
 
@@ -46,29 +46,15 @@ void skunk_8way_hash( void *output, const void *input )
      cube_4way_init( &ctx.cube, 512, 16, 32 );           
      cube_4way_update_close( &ctx.cube, vhash, vhash, 64 );  
      dintrlv_4x128_512( hash4, hash5, hash6, hash7, vhash );
-     
-     sph_fugue512( &ctx.fugue, hash0, 64 );
-     sph_fugue512_close( &ctx.fugue, hash0 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash1, 64 );
-     sph_fugue512_close( &ctx.fugue, hash1 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash2, 64 );
-     sph_fugue512_close( &ctx.fugue, hash2 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash3, 64 );
-     sph_fugue512_close( &ctx.fugue, hash3 );
-     sph_fugue512( &ctx.fugue, hash4, 64 );
-     sph_fugue512_close( &ctx.fugue, hash4 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash5, 64 );
-     sph_fugue512_close( &ctx.fugue, hash5 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash6, 64 );
-     sph_fugue512_close( &ctx.fugue, hash6 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash7, 64 );
-     sph_fugue512_close( &ctx.fugue, hash7 );
+
+     fugue512_full( &ctx.fugue, hash0, hash0, 64 );
+     fugue512_full( &ctx.fugue, hash1, hash1, 64 );
+     fugue512_full( &ctx.fugue, hash2, hash2, 64 );
+     fugue512_full( &ctx.fugue, hash3, hash3, 64 );
+     fugue512_full( &ctx.fugue, hash4, hash4, 64 );
+     fugue512_full( &ctx.fugue, hash5, hash5, 64 );
+     fugue512_full( &ctx.fugue, hash6, hash6, 64 );
+     fugue512_full( &ctx.fugue, hash7, hash7, 64 );
 
      sph_gost512( &ctx.gost, hash0, 64 );
      sph_gost512_close( &ctx.gost, output );
@@ -128,7 +114,7 @@ int scanhash_skunk_8way( struct work *work, uint32_t max_nonce,
          submit_solution( work, hash+(i<<3), mythr );
       }
       *noncev = _mm512_add_epi32( *noncev,
-                                  m512_const1_64( 0x0000000800000000 ) );
+                                  _mm512_set1_epi64( 0x0000000800000000 ) );
       n +=8;
    } while ( likely( ( n < last_nonce ) && !( *restart ) ) );
    pdata[19] = n;
@@ -140,7 +126,6 @@ bool skunk_8way_thread_init()
 {
    skein512_8way_init( &skunk_8way_ctx.skein );
    cube_4way_init( &skunk_8way_ctx.cube, 512, 16, 32 );
-   sph_fugue512_init( &skunk_8way_ctx.fugue );
    sph_gost512_init( &skunk_8way_ctx.gost );
    return true;
 }
@@ -150,7 +135,7 @@ bool skunk_8way_thread_init()
 typedef struct {
     skein512_4way_context skein;
     cubehashParam         cube;
-    sph_fugue512_context  fugue;
+    hashState_fugue       fugue;
     sph_gost512_context   gost;
 } skunk_4way_ctx_holder;
 
@@ -170,25 +155,18 @@ void skunk_4way_hash( void *output, const void *input )
      skein512_4way_final16( &ctx.skein, vhash, input + (64*4) );
      dintrlv_4x64( hash0, hash1, hash2, hash3, vhash, 512 );
 
-     cubehashUpdateDigest( &ctx.cube, (byte*) hash0, (const byte*)hash0, 64 );
+     cubehashUpdateDigest( &ctx.cube, hash0, hash0, 64 );
      memcpy( &ctx.cube, &skunk_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash1, (const byte*) hash1, 64 );
+     cubehashUpdateDigest( &ctx.cube, hash1, hash1, 64 );
      memcpy( &ctx.cube, &skunk_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash2, (const byte*) hash2, 64 );
+     cubehashUpdateDigest( &ctx.cube, hash2, hash2, 64 );
      memcpy( &ctx.cube, &skunk_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash3, (const byte*) hash3, 64 );
+     cubehashUpdateDigest( &ctx.cube, hash3, hash3, 64 );
 
-     sph_fugue512( &ctx.fugue, hash0, 64 );
-     sph_fugue512_close( &ctx.fugue, hash0 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash1, 64 );
-     sph_fugue512_close( &ctx.fugue, hash1 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash2, 64 );
-     sph_fugue512_close( &ctx.fugue, hash2 );
-     sph_fugue512_init( &ctx.fugue );
-     sph_fugue512( &ctx.fugue, hash3, 64 );
-     sph_fugue512_close( &ctx.fugue, hash3 );
+     fugue512_full( &ctx.fugue, hash0, hash0, 64 );
+     fugue512_full( &ctx.fugue, hash1, hash1, 64 );
+     fugue512_full( &ctx.fugue, hash2, hash2, 64 );
+     fugue512_full( &ctx.fugue, hash3, hash3, 64 );
 
      sph_gost512( &ctx.gost, hash0, 64 );
      sph_gost512_close( &ctx.gost, hash0 );
@@ -240,7 +218,7 @@ int scanhash_skunk_4way( struct work *work, uint32_t max_nonce,
          submit_solution( work, hash+(i<<3), mythr );
       }
       *noncev = _mm256_add_epi32( *noncev,
-                                  m256_const1_64( 0x0000000400000000 ) );
+                                  _mm256_set1_epi64x( 0x0000000400000000 ) );
       n +=4;
    } while ( likely( ( n < last_nonce ) && !( *restart ) ) );
    pdata[19] = n;
@@ -252,7 +230,6 @@ bool skunk_4way_thread_init()
 {
    skein512_4way_init( &skunk_4way_ctx.skein );
    cubehashInit( &skunk_4way_ctx.cube, 512, 16, 32 );
-   sph_fugue512_init( &skunk_4way_ctx.fugue );
    sph_gost512_init( &skunk_4way_ctx.gost );
    return true;
 }

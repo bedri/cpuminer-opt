@@ -2,34 +2,27 @@
 #include <string.h>
 #include <stdint.h>
 #include "skein-hash-4way.h"
-
-// 8 way is faster than SHA on Icelake
-// SHA is faster than 4 way on Ryzen
-//
-#if defined(__SHA__)
-  #include <openssl/sha.h>
-#endif
-#include "algo/sha/sha-hash-4way.h"
+#include "algo/sha/sha256-hash.h"
 
 #if defined (SKEIN_8WAY)
 
-static __thread skein512_8way_context skein512_8way_ctx
+static __thread skein512_8x64_context skein512_8x64_ctx
                                             __attribute__ ((aligned (64)));
 
 void skeinhash_8way( void *state, const void *input )
 {
      uint64_t vhash64[8*8] __attribute__ ((aligned (128)));
-     skein512_8way_context ctx_skein;
-     memcpy( &ctx_skein, &skein512_8way_ctx, sizeof( ctx_skein ) );
+     skein512_8x64_context ctx_skein;
+     memcpy( &ctx_skein, &skein512_8x64_ctx, sizeof( ctx_skein ) );
      uint32_t vhash32[16*8] __attribute__ ((aligned (128)));
-     sha256_8way_context ctx_sha256;
+     sha256_8x32_context ctx_sha256;
 
-     skein512_8way_final16( &ctx_skein, vhash64, input + (64*8) );
+     skein512_8x64_final16( &ctx_skein, vhash64, input + (64*8) );
      rintrlv_8x64_8x32( vhash32, vhash64, 512 );
 
-     sha256_8way_init( &ctx_sha256 );
-     sha256_8way_update( &ctx_sha256, vhash32, 64 );
-     sha256_8way_close( &ctx_sha256, state );
+     sha256_8x32_init( &ctx_sha256 );
+     sha256_8x32_update( &ctx_sha256, vhash32, 64 );
+     sha256_8x32_close( &ctx_sha256, state );
 }
 
 int scanhash_skein_8way( struct work *work, uint32_t max_nonce,
@@ -53,7 +46,7 @@ int scanhash_skein_8way( struct work *work, uint32_t max_nonce,
    *noncev = mm512_intrlv_blend_32(
                 _mm512_set_epi32( n+7, 0, n+6, 0, n+5, 0, n+4, 0,
                                   n+3, 0, n+2, 0, n+1, 0, n  , 0 ), *noncev );
-   skein512_8way_prehash64( &skein512_8way_ctx, vdata );
+   skein512_8x64_prehash64( &skein512_8x64_ctx, vdata );
    do
    {
        skeinhash_8way( hash, vdata );
@@ -69,7 +62,7 @@ int scanhash_skein_8way( struct work *work, uint32_t max_nonce,
           }
        }
        *noncev = _mm512_add_epi32( *noncev,
-                                  m512_const1_64( 0x0000000800000000 ) );
+                                  _mm512_set1_epi64( 0x0000000800000000 ) );
        n += 8;
     } while ( likely( (n < last_nonce) && !work_restart[thr_id].restart ) );
 
@@ -80,53 +73,44 @@ int scanhash_skein_8way( struct work *work, uint32_t max_nonce,
 
 #elif defined (SKEIN_4WAY)
 
-static __thread skein512_4way_context skein512_4way_ctx
+static __thread skein512_4x64_context skein512_4x64_ctx
                                             __attribute__ ((aligned (64)));
 
 void skeinhash_4way( void *state, const void *input )
 {
      uint64_t vhash64[8*4] __attribute__ ((aligned (128)));
-     skein512_4way_context ctx_skein;
-     memcpy( &ctx_skein, &skein512_4way_ctx, sizeof( ctx_skein ) );
+     skein512_4x64_context ctx_skein;
+     memcpy( &ctx_skein, &skein512_4x64_ctx, sizeof( ctx_skein ) );
 #if defined(__SHA__)
      uint32_t hash0[16] __attribute__ ((aligned (64)));
      uint32_t hash1[16] __attribute__ ((aligned (64)));
      uint32_t hash2[16] __attribute__ ((aligned (64)));
      uint32_t hash3[16] __attribute__ ((aligned (64)));
-     SHA256_CTX ctx_sha256;
 #else
      uint32_t vhash32[16*4] __attribute__ ((aligned (64)));
-     sha256_4way_context ctx_sha256;
+     sha256_4x32_context ctx_sha256;
 #endif
 
-     skein512_4way_final16( &ctx_skein, vhash64, input + (64*4) );
+     skein512_4x64_final16( &ctx_skein, vhash64, input + (64*4) );
 
 #if defined(__SHA__)      
+
      dintrlv_4x64( hash0, hash1, hash2, hash3, vhash64, 512 );
 
-     SHA256_Init( &ctx_sha256 );
-     SHA256_Update( &ctx_sha256, (unsigned char*)hash0, 64 );
-     SHA256_Final( (unsigned char*)hash0, &ctx_sha256 );
-
-     SHA256_Init( &ctx_sha256 );
-     SHA256_Update( &ctx_sha256, (unsigned char*)hash1, 64 );
-     SHA256_Final( (unsigned char*)hash1, &ctx_sha256 );
-
-     SHA256_Init( &ctx_sha256 );
-     SHA256_Update( &ctx_sha256, (unsigned char*)hash2, 64 );
-     SHA256_Final( (unsigned char*)hash2, &ctx_sha256 );
-
-     SHA256_Init( &ctx_sha256 );
-     SHA256_Update( &ctx_sha256, (unsigned char*)hash3, 64 );
-     SHA256_Final( (unsigned char*)hash3, &ctx_sha256 );
-
+     sha256_full( hash0, hash0, 64 );
+     sha256_full( hash1, hash1, 64 );
+     sha256_full( hash2, hash2, 64 );
+     sha256_full( hash3, hash3, 64 );
+    
      intrlv_4x32( state, hash0, hash1, hash2, hash3, 256 );
-#else
-     rintrlv_4x64_4x32( vhash32, vhash64, 512 );
 
-     sha256_4way_init( &ctx_sha256 );
-     sha256_4way_update( &ctx_sha256, vhash32, 64 );
-     sha256_4way_close( &ctx_sha256, state );
+#else
+
+     rintrlv_4x64_4x32( vhash32, vhash64, 512 );
+     sha256_4x32_init( &ctx_sha256 );
+     sha256_4x32_update( &ctx_sha256, vhash32, 64 );
+     sha256_4x32_close( &ctx_sha256, state );
+
 #endif
 }
 
@@ -148,7 +132,7 @@ int scanhash_skein_4way( struct work *work, uint32_t max_nonce,
     const bool bench = opt_benchmark;
 
    mm256_bswap32_intrlv80_4x64( vdata, pdata );
-   skein512_4way_prehash64( &skein512_4way_ctx, vdata );
+   skein512_4x64_prehash64( &skein512_4x64_ctx, vdata );
 
    *noncev = mm256_intrlv_blend_32(
                 _mm256_set_epi32( n+3, 0, n+2, 0, n+1, 0, n, 0 ), *noncev );
@@ -166,8 +150,73 @@ int scanhash_skein_4way( struct work *work, uint32_t max_nonce,
           }
        }
        *noncev = _mm256_add_epi32( *noncev,
-                                  m256_const1_64( 0x0000000400000000 ) );
+                                  _mm256_set1_epi64x( 0x0000000400000000 ) );
        n += 4;
+    } while ( likely( (n < last_nonce) && !work_restart[thr_id].restart ) );
+
+    pdata[19] = n;
+    *hashes_done = n - first_nonce;
+    return 0;
+}
+
+#elif defined(SKEIN_2WAY)
+
+static __thread skein512_2x64_context skein512_2x64_ctx
+                                            __attribute__ ((aligned (64)));
+
+void skeinhash_2x64( void *state, const void *input )
+{
+     uint64_t vhash64[8*2] __attribute__ ((aligned (32)));
+     uint32_t hash0[16] __attribute__ ((aligned (32)));
+     uint32_t hash1[16] __attribute__ ((aligned (32)));
+     skein512_2x64_context ctx_skein;
+     memcpy( &ctx_skein, &skein512_2x64_ctx, sizeof( ctx_skein ) );
+
+     skein512_2x64_final16( &ctx_skein, vhash64, input + (64*2) );
+
+     dintrlv_2x64( hash0, hash1, vhash64, 512 );
+
+     sha256_full( hash0, hash0, 64 );
+     sha256_full( hash1, hash1, 64 );
+
+     intrlv_2x32( state, hash0, hash1, 256 );
+}
+
+int scanhash_skein_2x64( struct work *work, uint32_t max_nonce,
+                         uint64_t *hashes_done, struct thr_info *mythr )
+{
+    uint32_t vdata[20*2] __attribute__ ((aligned (32)));
+    uint32_t hash[8*2] __attribute__ ((aligned (32)));
+    uint32_t lane_hash[8] __attribute__ ((aligned (32)));
+    uint32_t *hash_d7 = &(hash[7<<1]);
+    uint32_t *pdata = work->data;
+    uint32_t *ptarget = work->target;
+    const uint32_t targ_d7 = ptarget[7];
+    const uint32_t first_nonce = pdata[19];
+    const uint32_t last_nonce = max_nonce - 2;
+    uint32_t n = first_nonce;
+    v128u32_t  *noncev = (v128u32_t*)vdata + 9;
+    const int thr_id = mythr->id;
+    const bool bench = opt_benchmark;
+
+   v128_bswap32_intrlv80_2x64( vdata, pdata );
+   skein512_2x64_prehash64( &skein512_2x64_ctx, vdata );
+   *noncev = v128_intrlv_blend_32( v128_set32( n+1, 0, n, 0 ), *noncev );
+   do
+   {
+       skeinhash_2x64( hash, vdata );
+       for ( int lane = 0; lane < 2; lane++ )
+       if ( unlikely( ( hash_d7[ lane ] <= targ_d7 ) && !bench ) )
+       {
+          extr_lane_2x32( lane_hash, hash, lane, 256 );
+          if ( valid_hash( lane_hash, ptarget ) )
+          {
+             pdata[19] = bswap_32( n + lane );
+             submit_solution( work, lane_hash, mythr );
+          }
+       }
+       *noncev = v128_add32( *noncev, v128_64( 0x0000000200000000 ) );
+       n += 2;
     } while ( likely( (n < last_nonce) && !work_restart[thr_id].restart ) );
 
     pdata[19] = n;
