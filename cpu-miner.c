@@ -1225,6 +1225,7 @@ void report_summary_log( bool force )
 {
    struct timeval now, et, uptime, start_time;
 
+  /*
   if ( rejected_share_count > 10 )
   {
      if ( rejected_share_count > ( submitted_share_count / 2 ) )
@@ -1235,6 +1236,7 @@ void report_summary_log( bool force )
      else if ( rejected_share_count > ( submitted_share_count / 10 ) )
        applog(LOG_WARNING,"High rejected share rate, check settings.");
    }
+  */
 
    gettimeofday( &now, NULL );
    timeval_subtract( &et, &now, &five_min_start );
