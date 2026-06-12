@@ -80,14 +80,37 @@ const unsigned int HASHADAM_MIN_NUMBER_ITERATIONS = 2;
 const unsigned int HASHADAM_MAX_NUMBER_ITERATIONS = 6;
 const unsigned int HASHADAM_NUMBER_ALGOS = 11;
 
-void adam_kv(void *state, const void *input)
+static int get_algo_index_by_name(const char *name)
+{
+	if (strcmp(name, "blake") == 0) return 0;
+	if (strcmp(name, "bmw") == 0) return 1;
+	if (strcmp(name, "groestl") == 0) return 2;
+	if (strcmp(name, "jh") == 0) return 3;
+	if (strcmp(name, "keccak") == 0) return 4;
+	if (strcmp(name, "skein") == 0) return 5;
+	if (strcmp(name, "luffa") == 0) return 6;
+	if (strcmp(name, "cubehash") == 0) return 7;
+	if (strcmp(name, "shavite") == 0) return 8;
+	if (strcmp(name, "simd") == 0) return 9;
+	if (strcmp(name, "echo") == 0) return 10;
+	if (strcmp(name, "X11KVS") == 0 || strcmp(name, "ADAM") == 0) return 11;
+	if (strcmp(name, "DoubleSHA256") == 0) return 12;
+	if (strcmp(name, "hamsi") == 0) return 13;
+	if (strcmp(name, "fugue") == 0) return 14;
+	if (strcmp(name, "shabal") == 0) return 15;
+	if (strcmp(name, "whirlpool") == 0) return 16;
+	if (strcmp(name, "haval") == 0) return 17;
+	return 12; // default fallback
+}
+
+static void adam_kv_len(void *state, const void *input, int len)
 {
 	unsigned char hash[64] __attribute__((aligned(64)));
 	unsigned char *p;
 	adam_ctx_holder ctx;
 	memcpy(&ctx, &adam_ctx, sizeof(adam_ctx));
 
-	sph_blake512(&ctx.blake, input, 80);
+	sph_blake512(&ctx.blake, input, len);
 	sph_blake512_close(&ctx.blake, hash);
 
 	p = (unsigned char *)hash;
@@ -171,95 +194,178 @@ void adam_kv(void *state, const void *input)
 	memcpy(state, hash, 32);
 }
 
+void adam_kv(void *state, const void *input)
+{
+	adam_kv_len(state, input, 80);
+}
+
 void adam_kv_70(void *state, const void *input)
 {
-	unsigned char hash[64] __attribute__((aligned(64)));
-	unsigned char *p;
-	adam_ctx_holder ctx;
-	memcpy(&ctx, &adam_ctx, sizeof(adam_ctx));
+	adam_kv_len(state, input, 70);
+}
 
-	sph_blake512(&ctx.blake, input, 70);
-	sph_blake512_close(&ctx.blake, hash);
+static void run_single_algo(int algoIndex, void *output, const void *input, int len)
+{
+	unsigned char hash512[64] __attribute__((aligned(64)));
 
-	p = (unsigned char *)hash;
-	unsigned int n = HASHADAM_MIN_NUMBER_ITERATIONS + (p[63] % (HASHADAM_MAX_NUMBER_ITERATIONS - HASHADAM_MIN_NUMBER_ITERATIONS + 1));
-
-	for (int i = 1; i < n; i++)
-	{
-		p = (unsigned char *)hash;
-		switch (p[i] % 11)
-		{
-		case 0:
-			sph_blake512_init(&ctx.blake);
-			sph_blake512(&ctx.blake, (const void *)hash, 64);
-			sph_blake512_close(&ctx.blake, hash);
+	switch (algoIndex) {
+		case 0: { // blake
+			sph_blake512_context ctx;
+			sph_blake512_init(&ctx);
+			sph_blake512(&ctx, input, len);
+			sph_blake512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 1:
-			sph_bmw512_init(&ctx.bmw);
-			sph_bmw512(&ctx.bmw, (const void *)hash, 64);
-			sph_bmw512_close(&ctx.bmw, hash);
+		}
+		case 1: { // bmw
+			sph_bmw512_context ctx;
+			sph_bmw512_init(&ctx);
+			sph_bmw512(&ctx, input, len);
+			sph_bmw512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 2:
-#if defined(__AES__)
-			init_groestl(&ctx.groestl, 64);
-			update_and_final_groestl(&ctx.groestl, (char *)hash,
-									 (const char *)hash, 512);
-#else
-			sph_groestl512_init(&ctx.groestl);
-			sph_groestl512(&ctx.groestl, hash, 64);
-			sph_groestl512_close(&ctx.groestl, hash);
-#endif
+		}
+		case 2: { // groestl
+			sph_groestl512_context ctx;
+			sph_groestl512_init(&ctx);
+			sph_groestl512(&ctx, input, len);
+			sph_groestl512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 3:
-			sph_skein512_init(&ctx.skein);
-			sph_skein512(&ctx.skein, (const void *)hash, 64);
-			sph_skein512_close(&ctx.skein, hash);
+		}
+		case 3: { // jh
+			sph_jh512_context ctx;
+			sph_jh512_init(&ctx);
+			sph_jh512(&ctx, input, len);
+			sph_jh512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 4:
-			sph_jh512_init(&ctx.jh);
-			sph_jh512(&ctx.jh, (const void *)hash, 64);
-			sph_jh512_close(&ctx.jh, hash);
+		}
+		case 4: { // keccak
+			sph_keccak512_context ctx;
+			sph_keccak512_init(&ctx);
+			sph_keccak512(&ctx, input, len);
+			sph_keccak512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 5:
-			sph_keccak512_init(&ctx.keccak);
-			sph_keccak512(&ctx.keccak, (const void *)hash, 64);
-			sph_keccak512_close(&ctx.keccak, hash);
+		}
+		case 5: { // skein
+			sph_skein512_context ctx;
+			sph_skein512_init(&ctx);
+			sph_skein512(&ctx, input, len);
+			sph_skein512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 6:
-			init_luffa(&ctx.luffa, 512);
-			update_luffa(&ctx.luffa, (const BitSequence *)hash, 64);
-			final_luffa(&ctx.luffa, (BitSequence *)hash);
+		}
+		case 6: { // luffa
+			sph_luffa512_context ctx;
+			sph_luffa512_init(&ctx);
+			sph_luffa512(&ctx, input, len);
+			sph_luffa512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 7:
-			cubehashInit(&ctx.cube, 512, 16, 32);
-			cubehashUpdate(&ctx.cube, (const byte *)hash, 64);
-			cubehashDigest(&ctx.cube, (byte *)hash);
+		}
+		case 7: { // cubehash
+			sph_cubehash512_context ctx;
+			sph_cubehash512_init(&ctx);
+			sph_cubehash512(&ctx, input, len);
+			sph_cubehash512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 8:
-			sph_shavite512_init(&ctx.shavite);
-			sph_shavite512(&ctx.shavite, hash, 64);
-			sph_shavite512_close(&ctx.shavite, hash);
+		}
+		case 8: { // shavite
+			sph_shavite512_context ctx;
+			sph_shavite512_init(&ctx);
+			sph_shavite512(&ctx, input, len);
+			sph_shavite512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 9:
-			init_sd(&ctx.simd, 512);
-			update_sd(&ctx.simd, (const BitSequence *)hash, 512);
-			final_sd(&ctx.simd, (BitSequence *)hash);
+		}
+		case 9: { // simd
+			sph_simd512_context ctx;
+			sph_simd512_init(&ctx);
+			sph_simd512(&ctx, input, len);
+			sph_simd512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
 			break;
-		case 10:
-#if defined(__AES__)
-			init_echo(&ctx.echo, 512);
-			update_final_echo(&ctx.echo, (BitSequence *)hash,
-							  (const BitSequence *)hash, 512);
-#else
-			sph_echo512_init(&ctx.echo);
-			sph_echo512(&ctx.echo, hash, 64);
-			sph_echo512_close(&ctx.echo, hash);
-#endif
+		}
+		case 10: { // echo
+			sph_echo512_context ctx;
+			sph_echo512_init(&ctx);
+			sph_echo512(&ctx, input, len);
+			sph_echo512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
+			break;
+		}
+		case 11: { // X11KVS
+			adam_kv_len(output, input, len);
+			break;
+		}
+		case 12: { // DoubleSHA256
+			sha256d(output, input, len);
+			break;
+		}
+		case 13: { // hamsi
+			sph_hamsi512_context ctx;
+			sph_hamsi512_init(&ctx);
+			sph_hamsi512(&ctx, input, len);
+			sph_hamsi512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
+			break;
+		}
+		case 14: { // fugue
+			sph_fugue512_context ctx;
+			sph_fugue512_init(&ctx);
+			sph_fugue512(&ctx, input, len);
+			sph_fugue512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
+			break;
+		}
+		case 15: { // shabal
+			sph_shabal512_context ctx;
+			sph_shabal512_init(&ctx);
+			sph_shabal512(&ctx, input, len);
+			sph_shabal512_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
+			break;
+		}
+		case 16: { // whirlpool
+			sph_whirlpool_context ctx;
+			sph_whirlpool_init(&ctx);
+			sph_whirlpool(&ctx, input, len);
+			sph_whirlpool_close(&ctx, hash512);
+			memcpy(output, hash512, 32);
+			break;
+		}
+		case 17: { // haval
+			sph_haval256_5_context ctx;
+			sph_haval256_5_init(&ctx);
+			sph_haval256_5(&ctx, input, len);
+			sph_haval256_5_close(&ctx, output);
+			break;
+		}
+		default: {
+			sha256d(output, input, len);
 			break;
 		}
 	}
+}
 
-	memcpy(state, hash, 32);
+static void multiply_hash256(uint8_t *multiplied, const uint8_t *hash2, uint32_t i_factor)
+{
+	uint32_t words[8];
+	for (int i = 0; i < 8; i++) {
+		words[i] = le32dec(hash2 + i * 4);
+	}
+	uint64_t carry = 0;
+	for (int i = 0; i < 8; i++) {
+		uint64_t product = (uint64_t)words[i] * i_factor + carry;
+		words[i] = (uint32_t)product;
+		carry = product >> 32;
+	}
+	for (int i = 0; i < 8; i++) {
+		le32enc(multiplied + i * 4, words[i]);
+	}
 }
 
 const uint32_t HASHADAM_MAX_LEVEL = 7;
@@ -410,6 +516,40 @@ void adam_hash(void *output, const void *input, const char *powalgo)
 	memcpy(input70, input, 66);
 	uint32_t nonce = le32dec(((const uint8_t *)input) + 76);
 	le32enc(input70 + 66, nonce);
+
+	if (strchr(powalgo, '+') != NULL) {
+		char algo1_name[32];
+		char algo2_name[32];
+		const char *plus = strchr(powalgo, '+');
+		size_t len1 = plus - powalgo;
+		if (len1 >= sizeof(algo1_name)) len1 = sizeof(algo1_name) - 1;
+		memcpy(algo1_name, powalgo, len1);
+		algo1_name[len1] = '\0';
+		
+		size_t len2 = strlen(plus + 1);
+		if (len2 >= sizeof(algo2_name)) len2 = sizeof(algo2_name) - 1;
+		memcpy(algo2_name, plus + 1, len2);
+		algo2_name[len2] = '\0';
+
+		int algo1 = get_algo_index_by_name(algo1_name);
+		int algo2 = get_algo_index_by_name(algo2_name);
+
+		int algo2_raw = algo2;
+		if (algo2 > algo1) {
+			algo2_raw = algo2 - 1;
+		}
+		int minerIdx = algo1 * 17 + algo2_raw;
+
+		unsigned char hash2[32];
+		run_single_algo(algo2, hash2, input70, 70);
+
+		uint32_t i_factor = minerIdx + 1;
+		unsigned char multiplied[32];
+		multiply_hash256(multiplied, hash2, i_factor);
+
+		run_single_algo(algo1, output, multiplied, 32);
+		return;
+	}
 
 	unsigned char hash512[64] __attribute__((aligned(64)));
 
