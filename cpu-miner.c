@@ -139,23 +139,69 @@ static void *register_miner_thread_func(void *arg)
          continue;
       }
 
-      applog(LOG_NOTICE, "ADAM Auto-Register: Triggering registerminer pow via RPC...");
-      
       CURL *curl = curl_easy_init();
       if (curl) {
+         char check_req[256];
+         snprintf(check_req, sizeof(check_req),
+                  "{\"method\": \"getadamminers\", \"params\": [], \"id\": 1}\r\n");
+         
+         int err = 0;
+         bool already_registered = false;
+         json_t *val = json_rpc_call(curl, rpc_url, rpc_userpass, check_req, &err, 0);
+         if (val) {
+            json_t *result = json_object_get(val, "result");
+            if (result && json_is_array(result)) {
+               size_t size = json_array_size(result);
+               for (size_t i = 0; i < size; i++) {
+                  json_t *miner = json_array_get(result, i);
+                  if (miner && json_is_object(miner)) {
+                     json_t *addr_obj = json_object_get(miner, "address");
+                     json_t *pubkey_obj = json_object_get(miner, "pubkey");
+                     if (addr_obj && json_is_string(addr_obj)) {
+                        const char *addr_str = json_string_value(addr_obj);
+                        if (addr_str && strcmp(addr_str, coinbase_address) == 0) {
+                           already_registered = true;
+                           break;
+                        }
+                     }
+                     if (pubkey_obj && json_is_string(pubkey_obj)) {
+                        const char *pubkey_str = json_string_value(pubkey_obj);
+                        if (pubkey_str && strcmp(pubkey_str, coinbase_address) == 0) {
+                           already_registered = true;
+                           break;
+                        }
+                     }
+                  }
+               }
+            }
+            json_decref(val);
+         } else {
+            applog(LOG_ERR, "ADAM Auto-Register: Failed to retrieve active miners pool (CURL error %d)", err);
+         }
+
+         if (already_registered) {
+            applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is already registered in pool. Skipping.",
+                   coinbase_address);
+            curl_easy_cleanup(curl);
+            sleep(1800);
+            continue;
+         }
+
+         applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is not registered. Triggering registerminer pow...",
+                coinbase_address);
+
          char req[512];
          snprintf(req, sizeof(req),
                   "{\"method\": \"registerminer\", \"params\": [\"pow\", null, \"%s\"], \"id\": 1}\r\n",
                   coinbase_address);
          
-         int err = 0;
-         json_t *val = json_rpc_call(curl, rpc_url, rpc_userpass, req, &err, JSON_RPC_LONGPOLL);
+         err = 0;
+         val = json_rpc_call(curl, rpc_url, rpc_userpass, req, &err, JSON_RPC_LONGPOLL);
          if (val) {
             json_t *result = json_object_get(val, "result");
             if (result && json_is_string(result)) {
                applog(LOG_NOTICE, "ADAM Auto-Register: Successfully registered miner! TxID: %s",
                       json_string_value(result));
-               // Sleep for 30 minutes (1800 seconds) before checking/registering again
                sleep(1800);
             } else {
                json_t *error_obj = json_object_get(val, "error");
@@ -166,13 +212,11 @@ static void *register_miner_thread_func(void *arg)
                } else {
                   applog(LOG_NOTICE, "ADAM Auto-Register completed, but no transaction hash returned.");
                }
-               // Sleep for 30 seconds before retrying on RPC failure
                sleep(30);
             }
             json_decref(val);
          } else {
             applog(LOG_ERR, "ADAM Auto-Register: JSON-RPC call failed (CURL error %d)", err);
-            // Sleep for 30 seconds before retrying on CURL error
             sleep(30);
          }
          curl_easy_cleanup(curl);
@@ -4148,12 +4192,12 @@ int main(int argc, char *argv[])
    applog( LOG_INFO, "%d of %d miner threads started using '%s' algorithm",
                      opt_n_threads, num_cpus, algo_names[opt_algo] );
 
-   if ( opt_algo == ALGO_ADAM )
-   {
-      pthread_t reg_thread;
-      pthread_create( &reg_thread, NULL, register_miner_thread_func, NULL );
-      pthread_detach( reg_thread );
-   }
+    if ( opt_algo == ALGO_ADAM )
+    {
+       pthread_t reg_thread;
+       pthread_create( &reg_thread, NULL, register_miner_thread_func, NULL );
+       pthread_detach( reg_thread );
+    }
 
       /* main loop - simply wait for workio thread to exit */
 	pthread_join( thr_info[work_thr_id].pth, NULL );

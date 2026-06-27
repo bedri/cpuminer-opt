@@ -518,37 +518,92 @@ void adam_hash(void *output, const void *input, const char *powalgo)
 	le32enc(input70 + 66, nonce);
 
 	if (strchr(powalgo, '+') != NULL) {
-		char algo1_name[32];
-		char algo2_name[32];
-		const char *plus = strchr(powalgo, '+');
-		size_t len1 = plus - powalgo;
-		if (len1 >= sizeof(algo1_name)) len1 = sizeof(algo1_name) - 1;
-		memcpy(algo1_name, powalgo, len1);
-		algo1_name[len1] = '\0';
-		
-		size_t len2 = strlen(plus + 1);
-		if (len2 >= sizeof(algo2_name)) len2 = sizeof(algo2_name) - 1;
-		memcpy(algo2_name, plus + 1, len2);
-		algo2_name[len2] = '\0';
-
-		int algo1 = get_algo_index_by_name(algo1_name);
-		int algo2 = get_algo_index_by_name(algo2_name);
-
-		int algo2_raw = algo2;
-		if (algo2 > algo1) {
-			algo2_raw = algo2 - 1;
+		int plus_count = 0;
+		const char *p = powalgo;
+		while (*p) {
+			if (*p == '+') plus_count++;
+			p++;
 		}
-		int minerIdx = algo1 * 17 + algo2_raw;
 
-		unsigned char hash2[32];
-		run_single_algo(algo2, hash2, input70, 70);
+		if (plus_count == 3) {
+			char algo1_name[32] = {0};
+			char algo2_name[32] = {0};
+			char algo3_name[32] = {0};
+			char factor_name[32] = {0};
 
-		uint32_t i_factor = minerIdx + 1;
-		unsigned char multiplied[32];
-		multiply_hash256(multiplied, hash2, i_factor);
+			const char *p1 = strchr(powalgo, '+');
+			const char *p2 = strchr(p1 + 1, '+');
+			const char *p3 = strchr(p2 + 1, '+');
 
-		run_single_algo(algo1, output, multiplied, 32);
-		return;
+			size_t len1 = p1 - powalgo;
+			if (len1 >= 32) len1 = 31;
+			memcpy(algo1_name, powalgo, len1);
+
+			size_t len2 = p2 - (p1 + 1);
+			if (len2 >= 32) len2 = 31;
+			memcpy(algo2_name, p1 + 1, len2);
+
+			size_t len3 = p3 - (p2 + 1);
+			if (len3 >= 32) len3 = 31;
+			memcpy(algo3_name, p2 + 1, len3);
+
+			size_t len4 = strlen(p3 + 1);
+			if (len4 >= 32) len4 = 31;
+			memcpy(factor_name, p3 + 1, len4);
+
+			int algo1 = get_algo_index_by_name(algo1_name);
+			int algo2 = get_algo_index_by_name(algo2_name);
+			int algo3 = get_algo_index_by_name(algo3_name);
+			int minerIdx = atoi(factor_name);
+
+			unsigned char hash3[32];
+			run_single_algo(algo3, hash3, input70, 70);
+
+			uint32_t i_factor = minerIdx + 1;
+			unsigned char multiplied1[32];
+			multiply_hash256(multiplied1, hash3, i_factor);
+
+			unsigned char hash2[32];
+			run_single_algo(algo2, hash2, multiplied1, 32);
+
+			unsigned char multiplied2[32];
+			multiply_hash256(multiplied2, hash2, i_factor);
+
+			run_single_algo(algo1, output, multiplied2, 32);
+			return;
+		} else {
+			char algo1_name[32];
+			char algo2_name[32];
+			const char *plus = strchr(powalgo, '+');
+			size_t len1 = plus - powalgo;
+			if (len1 >= sizeof(algo1_name)) len1 = sizeof(algo1_name) - 1;
+			memcpy(algo1_name, powalgo, len1);
+			algo1_name[len1] = '\0';
+			
+			size_t len2 = strlen(plus + 1);
+			if (len2 >= sizeof(algo2_name)) len2 = sizeof(algo2_name) - 1;
+			memcpy(algo2_name, plus + 1, len2);
+			algo2_name[len2] = '\0';
+
+			int algo1 = get_algo_index_by_name(algo1_name);
+			int algo2 = get_algo_index_by_name(algo2_name);
+
+			int algo2_raw = algo2;
+			if (algo2 > algo1) {
+				algo2_raw = algo2 - 1;
+			}
+			int minerIdx = algo1 * 17 + algo2_raw;
+
+			unsigned char hash2[32];
+			run_single_algo(algo2, hash2, input70, 70);
+
+			uint32_t i_factor = minerIdx + 1;
+			unsigned char multiplied[32];
+			multiply_hash256(multiplied, hash2, i_factor);
+
+			run_single_algo(algo1, output, multiplied, 32);
+			return;
+		}
 	}
 
 	unsigned char hash512[64] __attribute__((aligned(64)));
