@@ -1859,7 +1859,21 @@ start:
 
    if ( have_gbt )
    {
-      rc = gbt_work_decode( json_object_get( val, "result" ), work );
+      json_t *res = json_object_get( val, "result" );
+      if ( opt_algo == ALGO_ADAM && res && json_is_object( res ) && !json_object_get( res, "puzzleheader" ) )
+      {
+         static time_t last_wait_log = 0;
+         time_t now = time(NULL);
+         if ( now - last_wait_log >= 30 )
+         {
+            applog( LOG_BLUE, "ADAM miner: Waiting for next block or election..." );
+            last_wait_log = now;
+         }
+         json_decref( val );
+         sleep( 2 );
+         goto start;
+      }
+      rc = gbt_work_decode( res, work );
       if ( !have_gbt )
       {
          json_decref( val );
@@ -1942,6 +1956,10 @@ start:
          restart_threads();
       }
    }  // rc
+   else
+   {
+      json_decref( val );
+   }
 
    return rc;
 }
