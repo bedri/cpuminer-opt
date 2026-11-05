@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include "algo/blake/sph_blake.h"
 #include "algo/bmw/sph_bmw.h"
 #include "algo/jh/sph_jh.h"
@@ -725,6 +726,8 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 	const uint32_t Htarg = ptarget[7];
 
 	if (work->is_puzzle) {
+		const time_t scan_start = time(NULL);
+		const int max_scan_sec = 5;
 		do {
 			pdata[19] = ++n;
 			adam_hash(hash64, pdata, work->pow_algo ? work->pow_algo : "DoubleSHA256");
@@ -732,6 +735,9 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 				if (fulltest(hash64, ptarget)) {
 					submit_solution(work, hash64, mythr);
 				}
+			}
+			if (((n - first_nonce) & 0x7ff) == 0 && (time(NULL) - scan_start) >= max_scan_sec) {
+				break;
 			}
 		} while (n < max_nonce && !work_restart[thr_id].restart);
 

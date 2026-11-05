@@ -1767,6 +1767,14 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
       if ( unlikely( !val ) )
       {
          applog( LOG_ERR, "submit_upstream_work json_rpc_call failed" );
+         if ( work->is_puzzle )
+         {
+            pthread_rwlock_wrlock( &g_work_lock );
+            g_work_time = 0;
+            pthread_rwlock_unlock( &g_work_lock );
+            restart_threads();
+            return true;
+         }
          return false;
       }
       res = json_object_get( val, "result" );
