@@ -1777,7 +1777,11 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
          free( res_str );
       }
       else
-         share_result( json_is_null( res ), work, json_string_value( res ) );
+      {
+         const char *res_str = json_string_value( res );
+         bool ok = json_is_null( res ) || ( res_str && strcmp( res_str, "valid" ) == 0 );
+         share_result( ok, work, ok ? NULL : res_str );
+      }
       json_decref( val );
       return true;     
    }
