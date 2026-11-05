@@ -728,6 +728,18 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
       }
    }
 
+   if ( opt_algo == ALGO_ADAM )
+   {
+      static time_t last_wait_log = 0;
+      time_t now = time(NULL);
+      if ( now - last_wait_log >= 30 )
+      {
+         applog( LOG_BLUE, "ADAM miner: Waiting for next block or election..." );
+         last_wait_log = now;
+      }
+      return false;
+   }
+
    tmp = json_object_get( val, "rules" );
    if ( tmp && json_is_array( tmp ) )
    {
