@@ -2568,7 +2568,7 @@ static void *miner_thread( void *userdata )
                 applog( LOG_ERR, "work retrieval failed, exiting miner thread %d", thr_id );
 		          goto out;
 	          }
-             g_work_time = now;
+             g_work_time = time(NULL);
           }
           pthread_rwlock_unlock( &g_work_lock );
        }
