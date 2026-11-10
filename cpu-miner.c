@@ -170,6 +170,8 @@ static void *register_miner_thread_func(void *arg)
       if (bc_res && json_is_object(bc_res)) {
          json_t *ibd_obj = json_object_get(bc_res, "initialblockdownload");
          json_t *blk_obj = json_object_get(bc_res, "blocks");
+         if (blk_obj && json_is_integer(blk_obj))
+            current_blocks = (int)json_integer_value(blk_obj);
          if (ibd_obj && json_is_boolean(ibd_obj)) {
             in_ibd = json_is_true(ibd_obj);
          } else {
@@ -191,8 +193,6 @@ static void *register_miner_thread_func(void *arg)
                }
             }
          }
-         if (blk_obj && json_is_integer(blk_obj))
-            current_blocks = (int)json_integer_value(blk_obj);
       }
       json_decref(bc_val);
 
