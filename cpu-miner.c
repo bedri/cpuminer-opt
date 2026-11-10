@@ -730,14 +730,19 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
 
    if ( opt_algo == ALGO_ADAM )
    {
-      static time_t last_wait_log = 0;
-      time_t now = time(NULL);
-      if ( now - last_wait_log >= 30 )
+      json_t *ver_obj = json_object_get( val, "version" );
+      int gbt_ver = ver_obj && json_is_integer( ver_obj ) ? (int)json_integer_value( ver_obj ) : 11;
+      if ( json_object_get( val, "status" ) || gbt_ver >= 11 )
       {
-         applog( LOG_BLUE, "ADAM miner: Waiting for next block or election..." );
-         last_wait_log = now;
+         static time_t last_wait_log = 0;
+         time_t now = time(NULL);
+         if ( now - last_wait_log >= 30 )
+         {
+            applog( LOG_BLUE, "ADAM miner: Waiting for next block or election..." );
+            last_wait_log = now;
+         }
+         return false;
       }
-      return false;
    }
 
    tmp = json_object_get( val, "rules" );
@@ -1833,8 +1838,19 @@ static bool get_upstream_work( CURL *curl, struct work *work )
 start:
    gettimeofday( &tv_start, NULL );
 
+   char gbt_req_buf[512];
+   const char *req_str = have_gbt ? gbt_req : getwork_req;
+   if ( have_gbt && coinbase_address && coinbase_address[0] != '\0' )
+   {
+      snprintf( gbt_req_buf, sizeof(gbt_req_buf),
+                "{\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": "
+                GBT_CAPABILITIES ", \"rules\": " GBT_RULES ", \"mineraddress\": \"%s\"}], \"id\":0}\r\n",
+                coinbase_address );
+      req_str = gbt_req_buf;
+   }
+
    val = json_rpc_call( curl, rpc_url, rpc_userpass,
-		           have_gbt ? gbt_req : getwork_req, &err,
+		           req_str, &err,
                            have_gbt ? JSON_RPC_QUIET_404 : 0);
  
    gettimeofday( &tv_end, NULL );
@@ -1868,7 +1884,9 @@ start:
    if ( have_gbt )
    {
       json_t *res = json_object_get( val, "result" );
-      if ( opt_algo == ALGO_ADAM && res && json_is_object( res ) && !json_object_get( res, "puzzleheader" ) )
+      json_t *res_ver = res && json_is_object( res ) ? json_object_get( res, "version" ) : NULL;
+      int gbt_ver = res_ver && json_is_integer( res_ver ) ? (int)json_integer_value( res_ver ) : 11;
+      if ( opt_algo == ALGO_ADAM && res && json_is_object( res ) && !json_object_get( res, "puzzleheader" ) && ( json_object_get( res, "status" ) || gbt_ver >= 11 ) )
       {
          static time_t last_wait_log = 0;
          time_t now = time(NULL);
@@ -3968,7 +3986,7 @@ int main(int argc, char *argv[])
          return 1;
 	}
 
-   if ( coinbase_address )
+   if ( coinbase_address && opt_algo != ALGO_ADAM )
    {
       pk_script_size = address_to_script( pk_script, pk_buffer_size,
                                           coinbase_address );
