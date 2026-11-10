@@ -130,8 +130,16 @@ char *coinbase_address;
 
 static void *register_miner_thread_func(void *arg)
 {
-   // Wait a few seconds for startup to settle down
-   sleep(5);
+   unsigned int jitter = (unsigned int)getpid();
+   if (coinbase_address) {
+      for (const char *p = coinbase_address; *p; ++p)
+         jitter = (jitter * 16777619u) ^ (unsigned char)(*p);
+   }
+
+   // Stagger initial startup across multiple local cpuminer processes
+   sleep(5 + (jitter % 19));
+
+   int wait_until_above_block = -1;
 
    while (1) {
       if (!rpc_url || !coinbase_address) {
@@ -140,90 +148,143 @@ static void *register_miner_thread_func(void *arg)
       }
 
       CURL *curl = curl_easy_init();
-      if (curl) {
-         char check_req[256];
-         snprintf(check_req, sizeof(check_req),
-                  "{\"method\": \"getadamminers\", \"params\": [], \"id\": 1}\r\n");
-         
-         int err = 0;
-         bool already_registered = false;
-         json_t *val = json_rpc_call(curl, rpc_url, rpc_userpass, check_req, &err, 0);
-         if (val) {
-            json_t *result = json_object_get(val, "result");
-            if (result && json_is_array(result)) {
-               size_t size = json_array_size(result);
-               for (size_t i = 0; i < size; i++) {
-                  json_t *miner = json_array_get(result, i);
-                  if (miner && json_is_object(miner)) {
-                     json_t *addr_obj = json_object_get(miner, "address");
-                     json_t *pubkey_obj = json_object_get(miner, "pubkey");
-                     if (addr_obj && json_is_string(addr_obj)) {
-                        const char *addr_str = json_string_value(addr_obj);
-                        if (addr_str && strcmp(addr_str, coinbase_address) == 0) {
-                           already_registered = true;
-                           break;
-                        }
+      if (!curl) {
+         applog(LOG_ERR, "ADAM Auto-Register: Failed to initialize curl");
+         sleep(30);
+         continue;
+      }
+
+      // 1. Ensure daemon has finished Initial Block Download and has blocks > 0
+      int err = 0;
+      const char *bc_req = "{\"method\": \"getblockchaininfo\", \"params\": [], \"id\": 1}\r\n";
+      json_t *bc_val = json_rpc_call(curl, rpc_url, rpc_userpass, bc_req, &err, JSON_RPC_IGNOREERR);
+      if (!bc_val) {
+         curl_easy_cleanup(curl);
+         sleep(10 + (jitter % 7));
+         continue;
+      }
+
+      int current_blocks = 0;
+      bool in_ibd = true;
+      json_t *bc_res = json_object_get(bc_val, "result");
+      if (bc_res && json_is_object(bc_res)) {
+         json_t *ibd_obj = json_object_get(bc_res, "initialblockdownload");
+         json_t *blk_obj = json_object_get(bc_res, "blocks");
+         if (ibd_obj && json_is_boolean(ibd_obj))
+            in_ibd = json_is_true(ibd_obj);
+         else
+            in_ibd = false;
+         if (blk_obj && json_is_integer(blk_obj))
+            current_blocks = (int)json_integer_value(blk_obj);
+      }
+      json_decref(bc_val);
+
+      if (in_ibd || current_blocks <= 0) {
+         static time_t last_ibd_log = 0;
+         time_t now = time(NULL);
+         if (now - last_ibd_log >= 30) {
+            applog(LOG_NOTICE, "ADAM Auto-Register: Waiting for node sync & first block (blocks=%d, ibd=%s)...",
+                   current_blocks, in_ibd ? "true" : "false");
+            last_ibd_log = now;
+         }
+         curl_easy_cleanup(curl);
+         sleep(8 + (jitter % 7));
+         continue;
+      }
+
+      if (wait_until_above_block >= 0 && current_blocks <= wait_until_above_block) {
+         curl_easy_cleanup(curl);
+         sleep(4 + (jitter % 5));
+         continue;
+      }
+      wait_until_above_block = -1;
+
+      // 2. Check if already registered in active ADAM validator pool
+      const char *check_req = "{\"method\": \"getadamminers\", \"params\": [], \"id\": 1}\r\n";
+      err = 0;
+      bool already_registered = false;
+      json_t *val = json_rpc_call(curl, rpc_url, rpc_userpass, check_req, &err, 0);
+      if (val) {
+         json_t *result = json_object_get(val, "result");
+         if (result && json_is_array(result)) {
+            size_t size = json_array_size(result);
+            for (size_t i = 0; i < size; i++) {
+               json_t *miner = json_array_get(result, i);
+               if (miner && json_is_object(miner)) {
+                  json_t *addr_obj = json_object_get(miner, "address");
+                  json_t *pubkey_obj = json_object_get(miner, "pubkey");
+                  if (addr_obj && json_is_string(addr_obj)) {
+                     const char *addr_str = json_string_value(addr_obj);
+                     if (addr_str && strcmp(addr_str, coinbase_address) == 0) {
+                        already_registered = true;
+                        break;
                      }
-                     if (pubkey_obj && json_is_string(pubkey_obj)) {
-                        const char *pubkey_str = json_string_value(pubkey_obj);
-                        if (pubkey_str && strcmp(pubkey_str, coinbase_address) == 0) {
-                           already_registered = true;
-                           break;
-                        }
+                  }
+                  if (pubkey_obj && json_is_string(pubkey_obj)) {
+                     const char *pubkey_str = json_string_value(pubkey_obj);
+                     if (pubkey_str && strcmp(pubkey_str, coinbase_address) == 0) {
+                        already_registered = true;
+                        break;
                      }
                   }
                }
             }
-            json_decref(val);
-         } else {
-            applog(LOG_ERR, "ADAM Auto-Register: Failed to retrieve active miners pool (CURL error %d)", err);
          }
+         json_decref(val);
+      } else {
+         applog(LOG_ERR, "ADAM Auto-Register: Failed to retrieve active miners pool (RPC/CURL code %d)", err);
+         curl_easy_cleanup(curl);
+         sleep(15 + (jitter % 11));
+         continue;
+      }
 
-         if (already_registered) {
-            applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is already registered in pool. Skipping.",
-                   coinbase_address);
+      if (already_registered) {
+         applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is active in ADAM pool. Next check in 30m.",
+                coinbase_address);
+         curl_easy_cleanup(curl);
+         sleep(1800);
+         continue;
+      }
+
+      applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is not registered. Triggering registerminer pow...",
+             coinbase_address);
+
+      char req[512];
+      snprintf(req, sizeof(req),
+               "{\"method\": \"registerminer\", \"params\": [\"pow\", null, \"%s\"], \"id\": 1}\r\n",
+               coinbase_address);
+
+      err = 0;
+      val = json_rpc_call(curl, rpc_url, rpc_userpass, req, &err, JSON_RPC_LONGPOLL | JSON_RPC_IGNOREERR);
+      if (val) {
+         json_t *result = json_object_get(val, "result");
+         json_t *error_obj = json_object_get(val, "error");
+         if (result && json_is_string(result) && (!error_obj || json_is_null(error_obj))) {
+            applog(LOG_NOTICE, "ADAM Auto-Register: Successfully registered miner! TxID: %s",
+                   json_string_value(result));
+            json_decref(val);
             curl_easy_cleanup(curl);
             sleep(1800);
             continue;
-         }
-
-         applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is not registered. Triggering registerminer pow...",
-                coinbase_address);
-
-         char req[512];
-         snprintf(req, sizeof(req),
-                  "{\"method\": \"registerminer\", \"params\": [\"pow\", null, \"%s\"], \"id\": 1}\r\n",
-                  coinbase_address);
-         
-         err = 0;
-         val = json_rpc_call(curl, rpc_url, rpc_userpass, req, &err, JSON_RPC_LONGPOLL);
-         if (val) {
-            json_t *result = json_object_get(val, "result");
-            if (result && json_is_string(result)) {
-               applog(LOG_NOTICE, "ADAM Auto-Register: Successfully registered miner! TxID: %s",
-                      json_string_value(result));
-               sleep(1800);
-            } else {
-               json_t *error_obj = json_object_get(val, "error");
-               if (error_obj && !json_is_null(error_obj)) {
-                  json_t *msg = json_object_get(error_obj, "message");
-                  applog(LOG_ERR, "ADAM Auto-Register failed: %s",
-                         msg ? json_string_value(msg) : "Unknown error");
-               } else {
-                  applog(LOG_NOTICE, "ADAM Auto-Register completed, but no transaction hash returned.");
-               }
-               sleep(30);
+         } else if (error_obj && !json_is_null(error_obj)) {
+            json_t *msg_obj = json_object_get(error_obj, "message");
+            const char *msg = (msg_obj && json_is_string(msg_obj)) ? json_string_value(msg_obj) : "Unknown error";
+            if (strstr(msg, "mempool") != NULL || strstr(msg, "next block") != NULL) {
+               applog(LOG_NOTICE, "ADAM Auto-Register: %s (waiting for block #%d)", msg, current_blocks + 1);
+               wait_until_above_block = current_blocks;
+               json_decref(val);
+               curl_easy_cleanup(curl);
+               sleep(4 + (jitter % 7));
+               continue;
             }
-            json_decref(val);
-         } else {
-            applog(LOG_ERR, "ADAM Auto-Register: JSON-RPC call failed (CURL error %d)", err);
-            sleep(30);
+            applog(LOG_ERR, "ADAM Auto-Register deferred: %s", msg);
          }
-         curl_easy_cleanup(curl);
+         json_decref(val);
       } else {
-         applog(LOG_ERR, "ADAM Auto-Register: Failed to initialize curl");
-         sleep(30);
+         applog(LOG_ERR, "ADAM Auto-Register: JSON-RPC call failed (code %d)", err);
       }
+      curl_easy_cleanup(curl);
+      sleep(30 + (jitter % 15));
    }
    return NULL;
 }
@@ -1871,7 +1932,7 @@ start:
       return false;
    }
 
-   if ( have_gbt && allow_getwork && !val && err == CURLE_OK )
+   if ( have_gbt && allow_getwork && opt_algo != ALGO_ADAM && opt_algo != ALGO_X11K && !val && err == CURLE_OK )
    {
       applog( LOG_NOTICE, "getblocktemplate failed, falling back to getwork" );
       have_gbt = false;
@@ -3985,6 +4046,12 @@ int main(int argc, char *argv[])
        else
          return 1;
 	}
+
+   if ( opt_algo == ALGO_ADAM || opt_algo == ALGO_X11K )
+   {
+      allow_getwork = false;
+      have_gbt = true;
+   }
 
    if ( coinbase_address && opt_algo != ALGO_ADAM )
    {
