@@ -732,7 +732,7 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
    {
       json_t *ver_obj = json_object_get( val, "version" );
       int gbt_ver = ver_obj && json_is_integer( ver_obj ) ? (int)json_integer_value( ver_obj ) : 11;
-      if ( json_object_get( val, "status" ) || gbt_ver >= 11 )
+      if ( json_object_get( val, "status" ) || gbt_ver >= 11 || ( !json_object_get( val, "coinbasetxn" ) && !pk_script_size ) )
       {
          static time_t last_wait_log = 0;
          time_t now = time(NULL);
@@ -1886,7 +1886,7 @@ start:
       json_t *res = json_object_get( val, "result" );
       json_t *res_ver = res && json_is_object( res ) ? json_object_get( res, "version" ) : NULL;
       int gbt_ver = res_ver && json_is_integer( res_ver ) ? (int)json_integer_value( res_ver ) : 11;
-      if ( opt_algo == ALGO_ADAM && res && json_is_object( res ) && !json_object_get( res, "puzzleheader" ) && ( json_object_get( res, "status" ) || gbt_ver >= 11 ) )
+      if ( opt_algo == ALGO_ADAM && res && json_is_object( res ) && !json_object_get( res, "puzzleheader" ) && ( json_object_get( res, "status" ) || gbt_ver >= 11 || ( !json_object_get( res, "coinbasetxn" ) && !pk_script_size ) ) )
       {
          static time_t last_wait_log = 0;
          time_t now = time(NULL);
