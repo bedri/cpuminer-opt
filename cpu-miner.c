@@ -170,10 +170,27 @@ static void *register_miner_thread_func(void *arg)
       if (bc_res && json_is_object(bc_res)) {
          json_t *ibd_obj = json_object_get(bc_res, "initialblockdownload");
          json_t *blk_obj = json_object_get(bc_res, "blocks");
-         if (ibd_obj && json_is_boolean(ibd_obj))
+         if (ibd_obj && json_is_boolean(ibd_obj)) {
             in_ibd = json_is_true(ibd_obj);
-         else
-            in_ibd = false;
+         } else {
+            json_t *hdr_obj = json_object_get(bc_res, "headers");
+            int current_headers = (hdr_obj && json_is_integer(hdr_obj)) ? (int)json_integer_value(hdr_obj) : current_blocks;
+            in_ibd = (current_headers > current_blocks);
+            if (!in_ibd) {
+               const char *mns_req = "{\"method\": \"mnsync\", \"params\": [\"status\"], \"id\": 1}\r\n";
+               int mns_err = 0;
+               json_t *mns_val = json_rpc_call(curl, rpc_url, rpc_userpass, mns_req, &mns_err, JSON_RPC_IGNOREERR);
+               if (mns_val) {
+                  json_t *mns_res = json_object_get(mns_val, "result");
+                  if (mns_res && json_is_object(mns_res)) {
+                     json_t *synced_obj = json_object_get(mns_res, "IsBlockchainSynced");
+                     if (synced_obj && json_is_boolean(synced_obj))
+                        in_ibd = !json_is_true(synced_obj);
+                  }
+                  json_decref(mns_val);
+               }
+            }
+         }
          if (blk_obj && json_is_integer(blk_obj))
             current_blocks = (int)json_integer_value(blk_obj);
       }
