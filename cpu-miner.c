@@ -109,8 +109,63 @@ static int opt_fail_pause = 10;
 static int opt_time_limit = 0;
 static unsigned int time_limit_stop = 0;
 int opt_timeout = 300;
-static int opt_scantime = 0;
+int opt_scantime = 0;
 const int min_scantime = 1;
+static bool opt_auto_register = true;
+static volatile sig_atomic_t g_exit_requested = 0;
+static char krista_chain[16] = {0};
+static pthread_mutex_t krista_chain_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void set_krista_chain(const char *chain)
+{
+   if (!chain || !chain[0])
+      return;
+   pthread_mutex_lock(&krista_chain_lock);
+   snprintf(krista_chain, sizeof(krista_chain), "%s", chain);
+   pthread_mutex_unlock(&krista_chain_lock);
+}
+
+static void copy_krista_chain(char *buf, size_t sz)
+{
+   pthread_mutex_lock(&krista_chain_lock);
+   snprintf(buf, sz, "%s", krista_chain);
+   pthread_mutex_unlock(&krista_chain_lock);
+}
+
+static const char *krista_dev_fund_address(void)
+{
+   char chain_buf[16];
+   copy_krista_chain(chain_buf, sizeof(chain_buf));
+   if (strcmp(chain_buf, "main") == 0)
+      return "KTeRC2Kj8hXcuzRohxPp2LtYFRJm2BceRoP";
+   if (strcmp(chain_buf, "test") == 0)
+      return "ktEooARF3HdV8w59LUc5jaHrS7GBL7974Uy";
+   if (strcmp(chain_buf, "regtest") == 0)
+      return "kt5KNitasi4bEHbQQCrpy6445nJD7uSVNux";
+   return NULL;
+}
+
+static void interruptible_sleep(int seconds)
+{
+   for (int i = 0; i < seconds && !g_exit_requested; i++)
+      sleep(1);
+}
+
+static bool adam_work_changed(const struct work *a, const struct work *b)
+{
+   if (a->is_puzzle != b->is_puzzle || a->height != b->height)
+      return true;
+   if (memcmp(a->target, b->target, sizeof(a->target)) != 0)
+      return true;
+   if (a->is_puzzle) {
+      if (memcmp(a->data, b->data, 76) != 0)
+         return true;
+      if (a->pow_algo && b->pow_algo)
+         return strcmp(a->pow_algo, b->pow_algo) != 0;
+      return a->pow_algo != b->pow_algo;
+   }
+   return memcmp(a->data, b->data, algo_gate.work_cmp_size) != 0;
+}
 //static const bool opt_time = true;
 enum algos opt_algo = ALGO_NULL;
 char* opt_param_key = NULL;
@@ -128,8 +183,29 @@ char *rpc_user, *rpc_pass;
 char *short_url = NULL;
 char *coinbase_address;
 
+static void ensure_krista_chain(CURL *curl)
+{
+   char chain_buf[16];
+   copy_krista_chain(chain_buf, sizeof(chain_buf));
+   if (chain_buf[0] != '\0' || !curl || !rpc_url)
+      return;
+   const char *bc_req = "{\"method\": \"getblockchaininfo\", \"params\": [], \"id\": 9}\r\n";
+   int err = 0;
+   json_t *bc_val = json_rpc_call(curl, rpc_url, rpc_userpass, bc_req, &err, JSON_RPC_IGNOREERR);
+   if (!bc_val)
+      return;
+   json_t *res = json_object_get(bc_val, "result");
+   if (res && json_is_object(res)) {
+      json_t *ch = json_object_get(res, "chain");
+      if (ch && json_is_string(ch))
+         set_krista_chain(json_string_value(ch));
+   }
+   json_decref(bc_val);
+}
+
 static void *register_miner_thread_func(void *arg)
 {
+   (void)arg;
    unsigned int jitter = (unsigned int)getpid();
    if (coinbase_address) {
       for (const char *p = coinbase_address; *p; ++p)
@@ -137,20 +213,23 @@ static void *register_miner_thread_func(void *arg)
    }
 
    // Stagger initial startup across multiple local cpuminer processes
-   sleep(5 + (jitter % 19));
+   interruptible_sleep(3 + (int)(jitter % 6));
 
    int wait_until_above_block = -1;
+   time_t last_promote_fail = 0;
+   time_t last_active_log = 0;
+   time_t last_locked_log = 0;
 
-   while (1) {
-      if (!rpc_url || !coinbase_address) {
-         sleep(15);
+   while (!g_exit_requested) {
+      if (!rpc_url || !coinbase_address || coinbase_address[0] == '\0') {
+         interruptible_sleep(15);
          continue;
       }
 
       CURL *curl = curl_easy_init();
       if (!curl) {
          applog(LOG_ERR, "ADAM Auto-Register: Failed to initialize curl");
-         sleep(30);
+         interruptible_sleep(30);
          continue;
       }
 
@@ -160,14 +239,20 @@ static void *register_miner_thread_func(void *arg)
       json_t *bc_val = json_rpc_call(curl, rpc_url, rpc_userpass, bc_req, &err, JSON_RPC_IGNOREERR);
       if (!bc_val) {
          curl_easy_cleanup(curl);
-         sleep(10 + (jitter % 7));
+         interruptible_sleep(10 + (int)(jitter % 7));
          continue;
       }
 
       int current_blocks = 0;
       bool in_ibd = true;
+      char chain_buf[16] = {0};
       json_t *bc_res = json_object_get(bc_val, "result");
       if (bc_res && json_is_object(bc_res)) {
+         json_t *ch_obj = json_object_get(bc_res, "chain");
+         if (ch_obj && json_is_string(ch_obj))
+            set_krista_chain(json_string_value(ch_obj));
+         copy_krista_chain(chain_buf, sizeof(chain_buf));
+
          json_t *ibd_obj = json_object_get(bc_res, "initialblockdownload");
          json_t *blk_obj = json_object_get(bc_res, "blocks");
          if (blk_obj && json_is_integer(blk_obj))
@@ -178,7 +263,7 @@ static void *register_miner_thread_func(void *arg)
             json_t *hdr_obj = json_object_get(bc_res, "headers");
             int current_headers = (hdr_obj && json_is_integer(hdr_obj)) ? (int)json_integer_value(hdr_obj) : current_blocks;
             in_ibd = (current_headers > current_blocks);
-            if (!in_ibd) {
+            if (!in_ibd && strcmp(chain_buf, "regtest") != 0) {
                const char *mns_req = "{\"method\": \"mnsync\", \"params\": [\"status\"], \"id\": 1}\r\n";
                int mns_err = 0;
                json_t *mns_val = json_rpc_call(curl, rpc_url, rpc_userpass, mns_req, &mns_err, JSON_RPC_IGNOREERR);
@@ -195,6 +280,7 @@ static void *register_miner_thread_func(void *arg)
          }
       }
       json_decref(bc_val);
+      copy_krista_chain(chain_buf, sizeof(chain_buf));
 
       if (in_ibd || current_blocks <= 0) {
          static time_t last_ibd_log = 0;
@@ -205,21 +291,23 @@ static void *register_miner_thread_func(void *arg)
             last_ibd_log = now;
          }
          curl_easy_cleanup(curl);
-         sleep(8 + (jitter % 7));
+         interruptible_sleep(8 + (int)(jitter % 7));
          continue;
       }
 
       if (wait_until_above_block >= 0 && current_blocks <= wait_until_above_block) {
          curl_easy_cleanup(curl);
-         sleep(4 + (jitter % 5));
+         interruptible_sleep(4 + (int)(jitter % 5));
          continue;
       }
       wait_until_above_block = -1;
 
-      // 2. Check if already registered in active ADAM validator pool
+      // 2. Check if already registered in active ADAM validator pool & inspect track/unlock_height
       const char *check_req = "{\"method\": \"getadamminers\", \"params\": [], \"id\": 1}\r\n";
       err = 0;
       bool already_registered = false;
+      char track[32] = "pow_lock";
+      int unlock_height = 0;
       json_t *val = json_rpc_call(curl, rpc_url, rpc_userpass, check_req, &err, 0);
       if (val) {
          json_t *result = json_object_get(val, "result");
@@ -228,21 +316,28 @@ static void *register_miner_thread_func(void *arg)
             for (size_t i = 0; i < size; i++) {
                json_t *miner = json_array_get(result, i);
                if (miner && json_is_object(miner)) {
+                  bool matched = false;
                   json_t *addr_obj = json_object_get(miner, "address");
                   json_t *pubkey_obj = json_object_get(miner, "pubkey");
                   if (addr_obj && json_is_string(addr_obj)) {
                      const char *addr_str = json_string_value(addr_obj);
-                     if (addr_str && strcmp(addr_str, coinbase_address) == 0) {
-                        already_registered = true;
-                        break;
-                     }
+                     if (addr_str && strcmp(addr_str, coinbase_address) == 0)
+                        matched = true;
                   }
-                  if (pubkey_obj && json_is_string(pubkey_obj)) {
+                  if (!matched && pubkey_obj && json_is_string(pubkey_obj)) {
                      const char *pubkey_str = json_string_value(pubkey_obj);
-                     if (pubkey_str && strcmp(pubkey_str, coinbase_address) == 0) {
-                        already_registered = true;
-                        break;
-                     }
+                     if (pubkey_str && strcmp(pubkey_str, coinbase_address) == 0)
+                        matched = true;
+                  }
+                  if (matched) {
+                     already_registered = true;
+                     json_t *trk_obj = json_object_get(miner, "track");
+                     if (trk_obj && json_is_string(trk_obj))
+                        snprintf(track, sizeof(track), "%s", json_string_value(trk_obj));
+                     json_t *uh_obj = json_object_get(miner, "unlock_height");
+                     if (uh_obj && json_is_integer(uh_obj))
+                        unlock_height = (int)json_integer_value(uh_obj);
+                     break;
                   }
                }
             }
@@ -251,20 +346,81 @@ static void *register_miner_thread_func(void *arg)
       } else {
          applog(LOG_ERR, "ADAM Auto-Register: Failed to retrieve active miners pool (RPC/CURL code %d)", err);
          curl_easy_cleanup(curl);
-         sleep(15 + (jitter % 11));
+         interruptible_sleep(15 + (int)(jitter % 11));
          continue;
       }
+
+      bool is_zero_track = (strcmp(track, "zerocoin_pow") == 0 || strcmp(track, "bootstrap") == 0);
+      bool is_test_or_reg = (strcmp(chain_buf, "regtest") == 0 || strcmp(chain_buf, "test") == 0);
+      bool test_modeld = (strcmp(chain_buf, "regtest") == 0 && current_blocks >= 200) ||
+                         (strcmp(chain_buf, "test") == 0 && current_blocks >= 500);
+      int renew_window = is_zero_track ? (test_modeld ? 8 : 24) : (test_modeld ? 15 : 240);
+      int blocks_remaining = (unlock_height > 0) ? (unlock_height - current_blocks) : 999999;
+
+      bool should_register = !already_registered;
+      bool is_renewal = false;
+      bool is_promotion = false;
 
       if (already_registered) {
-         applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is active in ADAM pool. Next check in 30m.",
-                coinbase_address);
+         if (unlock_height > 0 && blocks_remaining <= renew_window) {
+            should_register = true;
+            is_renewal = true;
+         } else if (is_zero_track && (time(NULL) - last_promote_fail >= 120)) {
+            const char *lu_req = "{\"method\": \"listunspent\", \"params\": [100], \"id\": 1}\r\n";
+            int lu_err = 0;
+            json_t *lu_val = json_rpc_call(curl, rpc_url, rpc_userpass, lu_req, &lu_err, JSON_RPC_IGNOREERR);
+            if (lu_val) {
+               json_t *lu_res = json_object_get(lu_val, "result");
+               if (lu_res && json_is_array(lu_res)) {
+                  double spendable_sum = 0.0;
+                  size_t n_utxo = json_array_size(lu_res);
+                  for (size_t i = 0; i < n_utxo; i++) {
+                     json_t *u = json_array_get(lu_res, i);
+                     if (!u || !json_is_object(u)) continue;
+                     json_t *sp = json_object_get(u, "spendable");
+                     if (sp && json_is_boolean(sp) && !json_is_true(sp))
+                        continue;
+                     json_t *amt = json_object_get(u, "amount");
+                     if (amt && json_is_number(amt))
+                        spendable_sum += json_number_value(amt);
+                  }
+                  if (spendable_sum >= 10.01) {
+                     should_register = true;
+                     is_promotion = true;
+                     applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s has %.2f KRISTA matured; promoting %s -> 10 KRISTA pow_lock...",
+                            coinbase_address, spendable_sum, track);
+                  }
+               }
+               json_decref(lu_val);
+            }
+         }
+      }
+
+      if (!should_register) {
+         time_t now = time(NULL);
+         if (now - last_active_log >= 600) {
+            applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s active (%s, unlock=%d, %d blocks left, renew<=%d).",
+                   coinbase_address, track, unlock_height, blocks_remaining, renew_window);
+            last_active_log = now;
+         }
+         int blocks_to_window = (unlock_height > 0 && blocks_remaining > renew_window)
+                                ? (blocks_remaining - renew_window) : 20;
+         int poll_sec = blocks_to_window * 15;
+         int max_poll = is_test_or_reg ? 30 : 180;
+         if (poll_sec < 10) poll_sec = 10;
+         if (poll_sec > max_poll) poll_sec = max_poll;
          curl_easy_cleanup(curl);
-         sleep(1800);
+         interruptible_sleep(poll_sec);
          continue;
       }
 
-      applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is not registered. Triggering registerminer pow...",
-             coinbase_address);
+      if (is_renewal) {
+         applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s (%s) in renewal window (%d blocks left <= %d). Triggering registerminer pow...",
+                coinbase_address, track, blocks_remaining, renew_window);
+      } else if (!is_promotion) {
+         applog(LOG_NOTICE, "ADAM Auto-Register: Miner %s is not registered. Triggering registerminer pow...",
+                coinbase_address);
+      }
 
       char req[512];
       snprintf(req, sizeof(req),
@@ -277,31 +433,50 @@ static void *register_miner_thread_func(void *arg)
          json_t *result = json_object_get(val, "result");
          json_t *error_obj = json_object_get(val, "error");
          if (result && json_is_string(result) && (!error_obj || json_is_null(error_obj))) {
-            applog(LOG_NOTICE, "ADAM Auto-Register: Successfully registered miner! TxID: %s",
+            applog(LOG_NOTICE, "ADAM Auto-Register: Successfully %s miner! TxID: %s",
+                   is_renewal ? "renewed" : (is_promotion ? "promoted" : "registered"),
                    json_string_value(result));
+            wait_until_above_block = current_blocks;
+            last_active_log = 0;
             json_decref(val);
             curl_easy_cleanup(curl);
-            sleep(1800);
+            interruptible_sleep(15);
             continue;
          } else if (error_obj && !json_is_null(error_obj)) {
             json_t *msg_obj = json_object_get(error_obj, "message");
             const char *msg = (msg_obj && json_is_string(msg_obj)) ? json_string_value(msg_obj) : "Unknown error";
-            if (strstr(msg, "mempool") != NULL || strstr(msg, "next block") != NULL) {
+            if (is_promotion)
+               last_promote_fail = time(NULL);
+            if (strstr(msg, "mempool") != NULL || strstr(msg, "next block") != NULL ||
+                strstr(msg, "already in progress") != NULL) {
                applog(LOG_NOTICE, "ADAM Auto-Register: %s (waiting for block #%d)", msg, current_blocks + 1);
                wait_until_above_block = current_blocks;
                json_decref(val);
                curl_easy_cleanup(curl);
-               sleep(4 + (jitter % 7));
+               interruptible_sleep(5 + (int)(jitter % 5));
+               continue;
+            }
+            if (strstr(msg, "walletpassphrase") != NULL || strstr(msg, "locked") != NULL) {
+               time_t now = time(NULL);
+               if (now - last_locked_log >= 120) {
+                  applog(LOG_ERR, "ADAM Auto-Register deferred: wallet is locked (unlock with walletpassphrase): %s", msg);
+                  last_locked_log = now;
+               }
+               json_decref(val);
+               curl_easy_cleanup(curl);
+               interruptible_sleep(60);
                continue;
             }
             applog(LOG_ERR, "ADAM Auto-Register deferred: %s", msg);
          }
          json_decref(val);
       } else {
+         if (is_promotion)
+            last_promote_fail = time(NULL);
          applog(LOG_ERR, "ADAM Auto-Register: JSON-RPC call failed (code %d)", err);
       }
       curl_easy_cleanup(curl);
-      sleep(30 + (jitter % 15));
+      interruptible_sleep(30 + (int)(jitter % 15));
    }
    return NULL;
 }
@@ -522,6 +697,7 @@ void get_currentalgo(char* buf, int sz)
 
 void proper_exit(int reason)
 {
+   g_exit_requested = 1;
    if (opt_debug) applog(LOG_INFO,"Program exit");
 #ifdef WIN32
 	if (opt_background) {
@@ -542,12 +718,12 @@ uint32_t* get_stratum_job_ntime()
 
 void work_free(struct work *w)
 {
-	if (w->txs) free(w->txs);
-	if (w->workid) free(w->workid);
-	if (w->job_id) free(w->job_id);
-	if (w->xnonce2) free(w->xnonce2);
-	if (w->adam_fields_hex) free(w->adam_fields_hex);
-	if (w->pow_algo) free(w->pow_algo);
+	if (w->txs) { free(w->txs); w->txs = NULL; }
+	if (w->workid) { free(w->workid); w->workid = NULL; }
+	if (w->job_id) { free(w->job_id); w->job_id = NULL; }
+	if (w->xnonce2) { free(w->xnonce2); w->xnonce2 = NULL; }
+	if (w->adam_fields_hex) { free(w->adam_fields_hex); w->adam_fields_hex = NULL; }
+	if (w->pow_algo) { free(w->pow_algo); w->pow_algo = NULL; }
 }
 
 void work_copy(struct work *dest, const struct work *src)
@@ -660,6 +836,10 @@ static bool get_mininginfo( CURL *curl, struct work *work )
    // "networkhashps": 56475980
    if ( res )
    {
+      json_t *ch_obj = json_object_get( res, "chain" );
+      if ( ch_obj && json_is_string( ch_obj ) )
+         set_krista_chain( json_string_value( ch_obj ) );
+
       double difficulty = 0.;
   		json_t *key = json_object_get( res, "difficulty" );
    	if ( key )
@@ -775,17 +955,21 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
       size_t puzzle_len = strlen(puzzle_hex) / 2;
       if (puzzle_len == 80) {
          hex2bin((unsigned char*)work->data, puzzle_hex, 80);
-         
+
          tmp = json_object_get(val, "powalgo");
-         if (tmp && json_is_string(tmp)) {
-            work->pow_algo = strdup(json_string_value(tmp));
-         } else {
-            work->pow_algo = strdup("DoubleSHA256");
+         if (!tmp || !json_is_string(tmp) || json_string_value(tmp)[0] == '\0') {
+            applog(LOG_ERR, "JSON invalid or missing powalgo on puzzle template");
+            return false;
          }
+         work->pow_algo = strdup(json_string_value(tmp));
          work->is_puzzle = true;
 
          // Target
-         jobj_binary(val, "target", target, sizeof(target));
+         if (unlikely(!jobj_binary(val, "target", target, sizeof(target)))) {
+            applog(LOG_ERR, "JSON invalid target");
+            work_free(work);
+            return false;
+         }
          casti_v128(work->target, 0) = v128_bswap128(casti_v128(target, 1));
          casti_v128(work->target, 1) = v128_bswap128(casti_v128(target, 0));
          net_diff = work->targetdiff = hash_to_diff(work->target);
@@ -795,7 +979,7 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
          work->txs = strdup("");
          work->tx_count = 0;
          work->sapling = false;
-         
+
          tmp = json_object_get(val, "workid");
          if (tmp && json_is_string(tmp)) {
             work->workid = strdup(json_string_value(tmp));
@@ -932,6 +1116,7 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
    }
    tx_count = (int) json_array_size( txa );
    tx_size = 0;
+   int64_t total_fees = 0;
    for ( i = 0; i < tx_count; i++ )
    {
       const json_t *tx = json_array_get( txa, i );
@@ -941,6 +1126,9 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
          applog( LOG_ERR, "JSON invalid transactions" );
          goto out;
       }
+      json_t *fee_obj = json_object_get( tx, "fee" );
+      if ( fee_obj && json_is_integer( fee_obj ) )
+         total_fees += (int64_t) json_integer_value( fee_obj );
       tx_size += (int) ( strlen( tx_hex ) / 2 );
    }
 
@@ -979,31 +1167,73 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
       }
       cbvalue = (int64_t) ( json_is_integer( tmp ) ? json_integer_value( tmp )
                                                    : json_number_value( tmp ) );
-      cbtx = (uchar*) malloc(256);
+
+      int64_t miner_val = cbvalue;
+      int64_t treasury_val = 0;
+      unsigned char treasury_script[32] = {0};
+      size_t treasury_script_size = 0;
+
+      if ( opt_algo == ALGO_ADAM && work->height > 1 && cbvalue > 0 )
+      {
+         int64_t block_subsidy = ( cbvalue > total_fees ) ? ( cbvalue - total_fees ) : 0;
+         treasury_val = ( block_subsidy * 7 ) / 100;
+         if ( treasury_val > 0 )
+         {
+            const char *dev_addr = krista_dev_fund_address();
+            if ( !dev_addr )
+            {
+               applog( LOG_ERR, "Classic PoW block %d requires known chain for 7%% Dev Fund output", work->height );
+               goto out;
+            }
+            treasury_script_size = address_to_script( treasury_script, sizeof(treasury_script), dev_addr );
+            if ( !treasury_script_size || treasury_script_size > 25 )
+            {
+               applog( LOG_ERR, "Failed to encode Dev Fund script for '%s'", dev_addr );
+               goto out;
+            }
+            miner_val = cbvalue - treasury_val;
+         }
+      }
+
+      cbtx = (uchar*) malloc(512);
       le32enc( (uint32_t *)cbtx, 1 ); /* version */
       cbtx[4] = 1; /* in-counter */
       memset( cbtx+5, 0x00, 32 ); /* prev txout hash */
       le32enc( (uint32_t *)(cbtx+37), 0xffffffff ); /* prev txout index */
       cbtx_size = 43;
       /* BIP 34: height in coinbase */
-      for ( n = work->height; n; n >>= 8 )
-         cbtx[cbtx_size++] = n & 0xff;
-      /* If the last byte pushed is >= 0x80, then we need to add
-         another zero byte to signal that the block height is a
-         positive number.  */
-      if (cbtx[cbtx_size - 1] & 0x80)
+      if (work->height == 0) {
          cbtx[cbtx_size++] = 0;
+      } else {
+         for ( n = work->height; n; n >>= 8 )
+            cbtx[cbtx_size++] = n & 0xff;
+         /* If the last byte pushed is >= 0x80, then we need to add
+            another zero byte to signal that the block height is a
+            positive number.  */
+         if (cbtx[cbtx_size - 1] & 0x80)
+            cbtx[cbtx_size++] = 0;
+      }
       cbtx[42] = cbtx_size - 43;
       cbtx[41] = cbtx_size - 42; /* scriptsig length */
       le32enc( (uint32_t *)( cbtx+cbtx_size ), 0xffffffff ); /* sequence */
       cbtx_size += 4;
-      cbtx[cbtx_size++] = segwit ? 2 : 1; /* out-counter */
-      le32enc( (uint32_t *)( cbtx+cbtx_size) , (uint32_t)cbvalue ); /* value */
-      le32enc( (uint32_t *)( cbtx+cbtx_size+4 ), cbvalue >> 32 );
+      cbtx[cbtx_size++] = (uint8_t)( 1 + ( treasury_script_size > 0 ? 1 : 0 ) + ( segwit ? 1 : 0 ) ); /* out-counter */
+      le32enc( (uint32_t *)( cbtx+cbtx_size) , (uint32_t)miner_val ); /* value */
+      le32enc( (uint32_t *)( cbtx+cbtx_size+4 ), miner_val >> 32 );
       cbtx_size += 8;
       cbtx[ cbtx_size++ ] = (uint8_t) pk_script_size; /* txout-script length */
       memcpy( cbtx+cbtx_size, pk_script, pk_script_size );
       cbtx_size += (int) pk_script_size;
+
+      if ( treasury_script_size > 0 )
+      {
+         le32enc( (uint32_t *)( cbtx+cbtx_size ), (uint32_t)treasury_val );
+         le32enc( (uint32_t *)( cbtx+cbtx_size+4 ), treasury_val >> 32 );
+         cbtx_size += 8;
+         cbtx[ cbtx_size++ ] = (uint8_t) treasury_script_size;
+         memcpy( cbtx+cbtx_size, treasury_script, treasury_script_size );
+         cbtx_size += (int) treasury_script_size;
+      }
 
        if ( segwit )
        {
@@ -1616,10 +1846,15 @@ static int share_result( int result, struct work *work,
      sprintf( ares, "A%d", accepted_share_count );
      sprintf( bres, "B%d", solved_block_count );
      if ( reason )
-        stale = strstr( reason, "job" ) || strstr( reason, "Job" );
+        stale = strstr( reason, "job" ) || strstr( reason, "Job" )
+             || strstr( reason, "stale" ) || strstr( reason, "Stale" )
+             || strstr( reason, "prevblk" ) || strstr( reason, "not-elected" )
+             || strstr( reason, "duplicate" ) || strstr( reason, "inconclusive" );
      else if ( work )
-        stale =  work->data[ algo_gate.ntime_index ]
-             != g_work.data[ algo_gate.ntime_index ];
+        stale = work->is_puzzle
+             ? ( memcmp( work->data, g_work.data, 76 ) != 0 )
+             : ( work->data[ algo_gate.ntime_index ]
+              != g_work.data[ algo_gate.ntime_index ] );
      if ( stale )
      {
         stale_share_count++;
@@ -1883,7 +2118,7 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
       {
          const char *res_str = json_string_value( res );
          bool ok = json_is_null( res ) || ( res_str && strcmp( res_str, "valid" ) == 0 );
-         share_result( ok, work, ok ? NULL : res_str );
+         share_result( ok, work, ok ? NULL : ( res_str ? res_str : "rejected" ) );
       }
       json_decref( val );
       return true;     
@@ -1974,9 +2209,13 @@ start:
             last_wait_log = now;
          }
          json_decref( val );
-         sleep( 2 );
+         sleep( 1 );
+         if ( g_exit_requested )
+            return false;
          goto start;
       }
+      if ( opt_algo == ALGO_ADAM )
+         ensure_krista_chain( curl );
       rc = gbt_work_decode( res, work );
       if ( !have_gbt )
       {
@@ -2010,14 +2249,28 @@ start:
          last_block_height = work->height;
          last_targetdiff = net_diff;
 
-         applog( LOG_BLUE, "New Block %d, Tx %d, Net Diff %.5g, Ntime %08x",
-                             work->height, work->tx_count, net_diff,
-                             bswap_32( work->data[ algo_gate.ntime_index ] ) );
+         if ( work->is_puzzle )
+            applog( LOG_BLUE, "New Block %d, Puzzle Algo %s, Net Diff %.5g",
+                                work->height,
+                                work->pow_algo ? work->pow_algo : "unknown",
+                                net_diff );
+         else
+            applog( LOG_BLUE, "New Block %d, Tx %d, Net Diff %.5g, Ntime %08x",
+                                work->height, work->tx_count, net_diff,
+                                bswap_32( work->data[ algo_gate.ntime_index ] ) );
       }
-      else if ( memcmp( work->data, g_work.data, algo_gate.work_cmp_size ) )
-         applog( LOG_BLUE, "New Work: Block %d, Tx %d, Net Diff %.5g, Ntime %08x",
-                             work->height, work->tx_count, net_diff,
-                             bswap_32( work->data[ algo_gate.ntime_index ] ) );
+      else if ( adam_work_changed( work, &g_work ) )
+      {
+         if ( work->is_puzzle )
+            applog( LOG_BLUE, "New Puzzle: Block %d, Algo %s, Net Diff %.5g",
+                                work->height,
+                                work->pow_algo ? work->pow_algo : "unknown",
+                                net_diff );
+         else
+            applog( LOG_BLUE, "New Work: Block %d, Tx %d, Net Diff %.5g, Ntime %08x",
+                                work->height, work->tx_count, net_diff,
+                                bswap_32( work->data[ algo_gate.ntime_index ] ) );
+      }
       else
         new_work = false;
 
@@ -2220,6 +2473,7 @@ static bool get_work(struct thr_info *thr, struct work *work)
 	/* wait for response, a unit of work */
 	work_heap = (struct work*) tq_pop(thr->q, NULL);
 	if ( !work_heap ) return false;
+	work_free(work);
    /* copy returned work into storage provided by caller */
 	memcpy( work, work_heap, sizeof(*work) );
 	free( work_heap );
@@ -2418,7 +2672,7 @@ void std_get_new_work( struct work* work, struct work* g_work, int thr_id,
                                      : false;
 
    if ( force_new_work || ( *nonceptr >= *end_nonce_ptr )
-     || memcmp( work->data, g_work->data, algo_gate.work_cmp_size ) )
+     || adam_work_changed( work, g_work ) )
    {
      work_free( work );
      work_copy( work, g_work );
@@ -3752,8 +4006,30 @@ void parse_arg(int key, char *arg )
    case 1031:   // bell
       opt_bell = true;
       break;
+   case 1032:   // no-auto-register
+      opt_auto_register = false;
+      break;
    case 1016:			/* --coinbase-addr */
-      if ( arg ) coinbase_address = strdup( arg );
+      if ( arg )
+      {
+         size_t len = strlen( arg );
+         if ( len == 0 || len >= 128 )
+         {
+            fprintf( stderr, "Invalid coinbase address length\n" );
+            show_usage_and_exit( 1 );
+         }
+         for ( size_t idx = 0; idx < len; idx++ )
+         {
+            unsigned char c = (unsigned char) arg[idx];
+            if ( c < 0x20 || c >= 0x7f || c == '"' || c == '\\' )
+            {
+               fprintf( stderr, "Invalid character in coinbase address\n" );
+               show_usage_and_exit( 1 );
+            }
+         }
+         free( coinbase_address );
+         coinbase_address = strdup( arg );
+      }
 		break;
 	case 1015:			/* --coinbase-sig */
 		if ( strlen( arg ) + 1 > sizeof(coinbase_sig) )
@@ -3916,10 +4192,12 @@ static void signal_handler(int sig)
 		applog(LOG_INFO, "SIGHUP received");
 		break;
 	case SIGINT:
+		g_exit_requested = 1;
 		applog(LOG_INFO, "SIGINT received, exiting");
 		proper_exit(0);
 		break;
 	case SIGTERM:
+		g_exit_requested = 1;
 		applog(LOG_INFO, "SIGTERM received, exiting");
 		proper_exit(0);
 		break;
@@ -3930,10 +4208,12 @@ BOOL WINAPI ConsoleHandler(DWORD dwType)
 {
 	switch (dwType) {
 	case CTRL_C_EVENT:
+		g_exit_requested = 1;
 		applog(LOG_INFO, "CTRL_C_EVENT received, exiting");
 		proper_exit(0);
 		break;
 	case CTRL_BREAK_EVENT:
+		g_exit_requested = 1;
 		applog(LOG_INFO, "CTRL_BREAK_EVENT received, exiting");
 		proper_exit(0);
 		break;
@@ -4010,9 +4290,10 @@ int main(int argc, char *argv[])
 
    if ( !opt_scantime )
    {
-      if      ( have_stratum )  opt_scantime = 30;
-      else if ( have_longpoll ) opt_scantime = LP_SCANTIME;
-      else                      opt_scantime = 5;
+      if      ( have_stratum )          opt_scantime = 30;
+      else if ( have_longpoll )         opt_scantime = LP_SCANTIME;
+      else if ( opt_algo == ALGO_ADAM ) opt_scantime = 3;
+      else                              opt_scantime = 5;
    }
 
    if ( opt_time_limit )
@@ -4070,14 +4351,35 @@ int main(int argc, char *argv[])
       have_gbt = true;
    }
 
-   if ( coinbase_address && opt_algo != ALGO_ADAM )
+   if ( coinbase_address )
    {
       pk_script_size = address_to_script( pk_script, pk_buffer_size,
                                           coinbase_address );
       if ( !pk_script_size )
       {
-         applog(LOG_ERR,"Invalid coinbase address: '%s'", coinbase_address );
-         exit(0);
+         bool is_comp_pubkey = false;
+         if ( opt_algo == ALGO_ADAM && strlen( coinbase_address ) == 66 &&
+              coinbase_address[0] == '0' &&
+              ( coinbase_address[1] == '2' || coinbase_address[1] == '3' ) )
+         {
+            is_comp_pubkey = true;
+            for ( int k = 0; k < 66; k++ )
+            {
+               char c = coinbase_address[k];
+               if ( !( (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ) )
+               {
+                  is_comp_pubkey = false;
+                  break;
+               }
+            }
+         }
+         if ( is_comp_pubkey )
+            applog( LOG_INFO, "Using compressed pubkey for ADAM V11/V12 mining (Classic PoW requires a KRISTA address)" );
+         else
+         {
+            applog( LOG_ERR, "Invalid coinbase address: '%s'", coinbase_address );
+            exit( 1 );
+         }
       }
    }
 
@@ -4336,7 +4638,8 @@ int main(int argc, char *argv[])
    applog( LOG_INFO, "%d of %d miner threads started using '%s' algorithm",
                      opt_n_threads, num_cpus, algo_names[opt_algo] );
 
-    if ( opt_algo == ALGO_ADAM )
+    if ( opt_algo == ALGO_ADAM && opt_auto_register && !opt_benchmark &&
+         coinbase_address && coinbase_address[0] != '\0' )
     {
        pthread_t reg_thread;
        pthread_create( &reg_thread, NULL, register_miner_thread_func, NULL );

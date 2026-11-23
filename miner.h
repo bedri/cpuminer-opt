@@ -789,6 +789,7 @@ extern bool opt_extranonce;
 extern bool opt_quiet;
 extern bool opt_redirect;
 extern int opt_timeout;
+extern int opt_scantime;
 extern bool want_longpoll;
 extern bool have_longpoll;
 extern bool have_gbt;
@@ -964,6 +965,7 @@ Options:\n\
       --hash-meter      display thread hash rates\n\
       --coinbase-addr=ADDR  payout address for solo mining\n\
       --coinbase-sig=TEXT  data to insert in the coinbase when possible\n\
+      --no-auto-register  disable automatic ADAM miner registration & renewal\n\
       --no-longpoll     disable long polling support\n\
       --no-getwork      disable getwork support\n\
       --no-gbt          disable getblocktemplate support\n\
@@ -1035,6 +1037,7 @@ static struct option const options[] = {
         { "no-redirect", 0, NULL, 1009 },
         { "no-stratum", 0, NULL, 1007 },
         { "no-extranonce", 0, NULL, 1012 },
+        { "no-auto-register", 0, NULL, 1032 },
         { "max-temp", 1, NULL, 1060 },
         { "max-diff", 1, NULL, 1061 },
         { "max-rate", 1, NULL, 1062 },

@@ -1162,6 +1162,19 @@ size_t address_to_script( unsigned char *out, size_t outsz, const char *addr )
 				memcpy( &out[2], &addrbin[1], 20 );
 			out[22] = 0x87;  /* OP_EQUAL */
 			return rv;
+		case 16:   /* KRISTA Mainnet P2SH */
+		case 19:   /* KRISTA Testnet/Regtest P2SH */
+			if ( decoded_sz == 25 && ( opt_algo == ALGO_ADAM || opt_algo == ALGO_X11K ) )
+			{
+				if ( outsz < ( rv = 23 ) )
+					return rv;
+				out[ 0] = 0xa9;  /* OP_HASH160 */
+				out[ 1] = 0x14;  /* push 20 bytes */
+				memcpy( &out[2], &addrbin[1], 20 );
+				out[22] = 0x87;  /* OP_EQUAL */
+				return rv;
+			}
+			/* fall through */
 		default:
 			if (outsz < (rv = 25))
 				return rv;

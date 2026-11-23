@@ -101,7 +101,7 @@ static int get_algo_index_by_name(const char *name)
 	if (strcmp(name, "shabal") == 0) return 15;
 	if (strcmp(name, "whirlpool") == 0) return 16;
 	if (strcmp(name, "haval") == 0) return 17;
-	return 12; // default fallback
+	return -1;
 }
 
 static void adam_kv_len(void *state, const void *input, int len)
@@ -441,7 +441,7 @@ void adam_base_hash_recursive(void *output, const void *input, uint32_t level, u
 		return;
 	}
 
-	if (cache && level == HASHADAM_MAX_LEVEL)
+	if (cache && level == HASHADAM_MAX_LEVEL && nonce > 0)
 	{
 		// cache clean
 		cache[((nonce - 1) % HASHADAM_CACHE_POSITIONS) * HASHADAM_CACHE_CHUNK] = 0x00;
@@ -511,6 +511,132 @@ void adam_base_hash(void *state, const void *input, uint8_t *cache)
 	adam_base_hash_recursive(state, input, HASHADAM_MAX_LEVEL, le32dec(((uint8_t *)input) + 76), cache);
 }
 
+static bool parse_adam_powalgo(const char *powalgo, int *mode, int *algo1, int *algo2, int *algo3, uint32_t *i_factor)
+{
+	if (!powalgo || !powalgo[0])
+		return false;
+
+	const char *plus1 = strchr(powalgo, '+');
+	if (!plus1) {
+		int a1 = get_algo_index_by_name(powalgo);
+		if (a1 < 0)
+			return false;
+		*mode = 1;
+		*algo1 = a1;
+		*algo2 = -1;
+		*algo3 = -1;
+		*i_factor = 1;
+		return true;
+	}
+
+	int plus_count = 0;
+	for (const char *p = powalgo; *p; ++p) {
+		if (*p == '+')
+			plus_count++;
+	}
+
+	if (plus_count == 3) {
+		char algo1_name[32] = {0};
+		char algo2_name[32] = {0};
+		char algo3_name[32] = {0};
+		char factor_name[32] = {0};
+
+		const char *p1 = plus1;
+		const char *p2 = strchr(p1 + 1, '+');
+		const char *p3 = strchr(p2 + 1, '+');
+		if (!p2 || !p3)
+			return false;
+
+		size_t len1 = (size_t)(p1 - powalgo);
+		size_t len2 = (size_t)(p2 - (p1 + 1));
+		size_t len3 = (size_t)(p3 - (p2 + 1));
+		size_t len4 = strlen(p3 + 1);
+		if (len1 == 0 || len1 >= sizeof(algo1_name) ||
+		    len2 == 0 || len2 >= sizeof(algo2_name) ||
+		    len3 == 0 || len3 >= sizeof(algo3_name) ||
+		    len4 == 0 || len4 >= sizeof(factor_name))
+			return false;
+
+		memcpy(algo1_name, powalgo, len1);
+		memcpy(algo2_name, p1 + 1, len2);
+		memcpy(algo3_name, p2 + 1, len3);
+		memcpy(factor_name, p3 + 1, len4);
+
+		for (size_t i = 0; i < len4; i++) {
+			if (factor_name[i] < '0' || factor_name[i] > '9')
+				return false;
+		}
+		unsigned long minerIdx = strtoul(factor_name, NULL, 10);
+
+		int a1 = get_algo_index_by_name(algo1_name);
+		int a2 = get_algo_index_by_name(algo2_name);
+		int a3 = get_algo_index_by_name(algo3_name);
+		if (a1 < 0 || a2 < 0 || a3 < 0)
+			return false;
+
+		*mode = 3;
+		*algo1 = a1;
+		*algo2 = a2;
+		*algo3 = a3;
+		*i_factor = (uint32_t)(minerIdx + 1UL);
+		return true;
+	}
+
+	if (plus_count == 1) {
+		char algo1_name[32] = {0};
+		char algo2_name[32] = {0};
+		size_t len1 = (size_t)(plus1 - powalgo);
+		size_t len2 = strlen(plus1 + 1);
+		if (len1 == 0 || len1 >= sizeof(algo1_name) ||
+		    len2 == 0 || len2 >= sizeof(algo2_name))
+			return false;
+
+		memcpy(algo1_name, powalgo, len1);
+		memcpy(algo2_name, plus1 + 1, len2);
+
+		int a1 = get_algo_index_by_name(algo1_name);
+		int a2 = get_algo_index_by_name(algo2_name);
+		if (a1 < 0 || a2 < 0)
+			return false;
+
+		int algo2_raw = (a2 > a1) ? (a2 - 1) : a2;
+		int minerIdx = a1 * 17 + algo2_raw;
+
+		*mode = 2;
+		*algo1 = a1;
+		*algo2 = a2;
+		*algo3 = -1;
+		*i_factor = (uint32_t)(minerIdx + 1);
+		return true;
+	}
+
+	return false;
+}
+
+static void adam_eval_parsed(void *output, const unsigned char *input70,
+                             int mode, int algo1, int algo2, int algo3, uint32_t i_factor)
+{
+	if (mode == 3) {
+		unsigned char hash3[32];
+		unsigned char multiplied1[32];
+		unsigned char hash2[32];
+		unsigned char multiplied2[32];
+		run_single_algo(algo3, hash3, input70, 70);
+		multiply_hash256(multiplied1, hash3, i_factor);
+		run_single_algo(algo2, hash2, multiplied1, 32);
+		multiply_hash256(multiplied2, hash2, i_factor);
+		run_single_algo(algo1, output, multiplied2, 32);
+	} else if (mode == 2) {
+		unsigned char hash2[32];
+		unsigned char multiplied[32];
+		run_single_algo(algo2, hash2, input70, 70);
+		multiply_hash256(multiplied, hash2, i_factor);
+		run_single_algo(algo1, output, multiplied, 32);
+	} else {
+		run_single_algo(algo1, output, input70, 70);
+	}
+}
+
 void adam_hash(void *output, const void *input, const char *powalgo)
 {
 	unsigned char input70[70];
@@ -518,199 +644,14 @@ void adam_hash(void *output, const void *input, const char *powalgo)
 	uint32_t nonce = le32dec(((const uint8_t *)input) + 76);
 	le32enc(input70 + 66, nonce);
 
-	if (strchr(powalgo, '+') != NULL) {
-		int plus_count = 0;
-		const char *p = powalgo;
-		while (*p) {
-			if (*p == '+') plus_count++;
-			p++;
-		}
-
-		if (plus_count == 3) {
-			char algo1_name[32] = {0};
-			char algo2_name[32] = {0};
-			char algo3_name[32] = {0};
-			char factor_name[32] = {0};
-
-			const char *p1 = strchr(powalgo, '+');
-			const char *p2 = strchr(p1 + 1, '+');
-			const char *p3 = strchr(p2 + 1, '+');
-
-			size_t len1 = p1 - powalgo;
-			if (len1 >= 32) len1 = 31;
-			memcpy(algo1_name, powalgo, len1);
-
-			size_t len2 = p2 - (p1 + 1);
-			if (len2 >= 32) len2 = 31;
-			memcpy(algo2_name, p1 + 1, len2);
-
-			size_t len3 = p3 - (p2 + 1);
-			if (len3 >= 32) len3 = 31;
-			memcpy(algo3_name, p2 + 1, len3);
-
-			size_t len4 = strlen(p3 + 1);
-			if (len4 >= 32) len4 = 31;
-			memcpy(factor_name, p3 + 1, len4);
-
-			int algo1 = get_algo_index_by_name(algo1_name);
-			int algo2 = get_algo_index_by_name(algo2_name);
-			int algo3 = get_algo_index_by_name(algo3_name);
-			int minerIdx = atoi(factor_name);
-
-			unsigned char hash3[32];
-			run_single_algo(algo3, hash3, input70, 70);
-
-			uint32_t i_factor = minerIdx + 1;
-			unsigned char multiplied1[32];
-			multiply_hash256(multiplied1, hash3, i_factor);
-
-			unsigned char hash2[32];
-			run_single_algo(algo2, hash2, multiplied1, 32);
-
-			unsigned char multiplied2[32];
-			multiply_hash256(multiplied2, hash2, i_factor);
-
-			run_single_algo(algo1, output, multiplied2, 32);
-			return;
-		} else {
-			char algo1_name[32];
-			char algo2_name[32];
-			const char *plus = strchr(powalgo, '+');
-			size_t len1 = plus - powalgo;
-			if (len1 >= sizeof(algo1_name)) len1 = sizeof(algo1_name) - 1;
-			memcpy(algo1_name, powalgo, len1);
-			algo1_name[len1] = '\0';
-			
-			size_t len2 = strlen(plus + 1);
-			if (len2 >= sizeof(algo2_name)) len2 = sizeof(algo2_name) - 1;
-			memcpy(algo2_name, plus + 1, len2);
-			algo2_name[len2] = '\0';
-
-			int algo1 = get_algo_index_by_name(algo1_name);
-			int algo2 = get_algo_index_by_name(algo2_name);
-
-			int algo2_raw = algo2;
-			if (algo2 > algo1) {
-				algo2_raw = algo2 - 1;
-			}
-			int minerIdx = algo1 * 17 + algo2_raw;
-
-			unsigned char hash2[32];
-			run_single_algo(algo2, hash2, input70, 70);
-
-			uint32_t i_factor = minerIdx + 1;
-			unsigned char multiplied[32];
-			multiply_hash256(multiplied, hash2, i_factor);
-
-			run_single_algo(algo1, output, multiplied, 32);
-			return;
-		}
+	int mode = 0, algo1 = -1, algo2 = -1, algo3 = -1;
+	uint32_t i_factor = 1;
+	if (!parse_adam_powalgo(powalgo, &mode, &algo1, &algo2, &algo3, &i_factor)) {
+		applog(LOG_ERR, "ADAM unknown powalgo: '%s'", powalgo ? powalgo : "(null)");
+		memset(output, 0, 32);
+		return;
 	}
-
-	unsigned char hash512[64] __attribute__((aligned(64)));
-
-	if (strcmp(powalgo, "blake") == 0) {
-		sph_blake512_context ctx;
-		sph_blake512_init(&ctx);
-		sph_blake512(&ctx, input70, 70);
-		sph_blake512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "bmw") == 0) {
-		sph_bmw512_context ctx;
-		sph_bmw512_init(&ctx);
-		sph_bmw512(&ctx, input70, 70);
-		sph_bmw512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "groestl") == 0) {
-		sph_groestl512_context ctx;
-		sph_groestl512_init(&ctx);
-		sph_groestl512(&ctx, input70, 70);
-		sph_groestl512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "jh") == 0) {
-		sph_jh512_context ctx;
-		sph_jh512_init(&ctx);
-		sph_jh512(&ctx, input70, 70);
-		sph_jh512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "keccak") == 0) {
-		sph_keccak512_context ctx;
-		sph_keccak512_init(&ctx);
-		sph_keccak512(&ctx, input70, 70);
-		sph_keccak512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "skein") == 0) {
-		sph_skein512_context ctx;
-		sph_skein512_init(&ctx);
-		sph_skein512(&ctx, input70, 70);
-		sph_skein512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "luffa") == 0) {
-		sph_luffa512_context ctx;
-		sph_luffa512_init(&ctx);
-		sph_luffa512(&ctx, input70, 70);
-		sph_luffa512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "cubehash") == 0) {
-		sph_cubehash512_context ctx;
-		sph_cubehash512_init(&ctx);
-		sph_cubehash512(&ctx, input70, 70);
-		sph_cubehash512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "shavite") == 0) {
-		sph_shavite512_context ctx;
-		sph_shavite512_init(&ctx);
-		sph_shavite512(&ctx, input70, 70);
-		sph_shavite512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "simd") == 0) {
-		sph_simd512_context ctx;
-		sph_simd512_init(&ctx);
-		sph_simd512(&ctx, input70, 70);
-		sph_simd512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "echo") == 0) {
-		sph_echo512_context ctx;
-		sph_echo512_init(&ctx);
-		sph_echo512(&ctx, input70, 70);
-		sph_echo512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "X11KVS") == 0 || strcmp(powalgo, "ADAM") == 0) {
-		adam_kv_70(output, input70);
-	} else if (strcmp(powalgo, "DoubleSHA256") == 0) {
-		sha256d(output, input70, 70);
-	} else if (strcmp(powalgo, "hamsi") == 0) {
-		sph_hamsi512_context ctx;
-		sph_hamsi512_init(&ctx);
-		sph_hamsi512(&ctx, input70, 70);
-		sph_hamsi512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "fugue") == 0) {
-		sph_fugue512_context ctx;
-		sph_fugue512_init(&ctx);
-		sph_fugue512(&ctx, input70, 70);
-		sph_fugue512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "shabal") == 0) {
-		sph_shabal512_context ctx;
-		sph_shabal512_init(&ctx);
-		sph_shabal512(&ctx, input70, 70);
-		sph_shabal512_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "whirlpool") == 0) {
-		sph_whirlpool_context ctx;
-		sph_whirlpool_init(&ctx);
-		sph_whirlpool(&ctx, input70, 70);
-		sph_whirlpool_close(&ctx, hash512);
-		memcpy(output, hash512, 32);
-	} else if (strcmp(powalgo, "haval") == 0) {
-		sph_haval256_5_context ctx;
-		sph_haval256_5_init(&ctx);
-		sph_haval256_5(&ctx, input70, 70);
-		sph_haval256_5_close(&ctx, output);
-	} else {
-		sha256d(output, input70, 70);
-	}
+	adam_eval_parsed(output, input70, mode, algo1, algo2, algo3, i_factor);
 }
 
 int scanhash_adam(struct work *work, uint32_t max_nonce,
@@ -721,30 +662,44 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 	uint32_t *pdata = work->data;
 	uint32_t *ptarget = work->target;
 	uint32_t n = pdata[19] - 1;
-	const uint32_t first_nonce = pdata[19];
 	int thr_id = mythr->id;
 	const uint32_t Htarg = ptarget[7];
 
 	if (work->is_puzzle) {
+		int mode = 0, algo1 = -1, algo2 = -1, algo3 = -1;
+		uint32_t i_factor = 1;
+		if (!work->pow_algo || !parse_adam_powalgo(work->pow_algo, &mode, &algo1, &algo2, &algo3, &i_factor)) {
+			applog(LOG_ERR, "ADAM invalid powalgo: '%s'", work->pow_algo ? work->pow_algo : "(null)");
+			*hashes_done = 0;
+			return 0;
+		}
+		uint8_t input70[70];
+		memcpy(input70, pdata, 66);
+
 		const time_t scan_start = time(NULL);
-		const int max_scan_sec = 5;
+		const int max_scan_sec = (opt_scantime > 0) ? opt_scantime : 3;
+		uint64_t done = 0;
 		do {
 			pdata[19] = ++n;
-			adam_hash(hash64, pdata, work->pow_algo ? work->pow_algo : "DoubleSHA256");
+			le32enc(input70 + 66, n);
+			adam_eval_parsed(hash64, input70, mode, algo1, algo2, algo3, i_factor);
+			done++;
 			if (hash64[7] <= ptarget[7]) {
 				if (fulltest(hash64, ptarget)) {
-					submit_solution(work, hash64, mythr);
+					if (submit_solution(work, hash64, mythr))
+						break;
 				}
 			}
-			if (((n - first_nonce) & 0x7ff) == 0 && (time(NULL) - scan_start) >= max_scan_sec) {
+			if ((done & 0x7ffULL) == 0 && (time(NULL) - scan_start) >= max_scan_sec) {
 				break;
 			}
 		} while (n < max_nonce && !work_restart[thr_id].restart);
 
-		*hashes_done = n - first_nonce + 1;
+		*hashes_done = done;
 		pdata[19] = n;
 		return 0;
 	}
+
 	uint64_t htmax[] = {
 		0,
 		0xF,
@@ -760,9 +715,21 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 		0xFFFF0000,
 		0};
 
-	uint8_t *cache = (uint8_t*) malloc(HASHADAM_CACHE_SIZE_6);
-
-	memset(cache, 0x00, HASHADAM_CACHE_SIZE_6);
+	static __thread uint8_t *tls_adam_cache = NULL;
+	static __thread uint32_t tls_prev_hdr[19] = {0};
+	static __thread bool tls_hdr_valid = false;
+	static __thread uint32_t tls_last_nonce = 0;
+	const uint32_t first_nonce = pdata[19];
+	if (!tls_adam_cache) {
+		tls_adam_cache = (uint8_t *)calloc(1, HASHADAM_CACHE_SIZE_6);
+		tls_hdr_valid = false;
+	}
+	if (!tls_hdr_valid || memcmp(tls_prev_hdr, pdata, 76) != 0 || first_nonce != tls_last_nonce + 1) {
+		if (tls_adam_cache)
+			memset(tls_adam_cache, 0x00, HASHADAM_CACHE_SIZE_6);
+		memcpy(tls_prev_hdr, pdata, 76);
+		tls_hdr_valid = true;
+	}
 
 	// big endian encode 0..18 uint32_t, 64 bits at a time
 	swab32_array(endiandata, pdata, 20);
@@ -777,11 +744,16 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 		}
 	}
 
+	const time_t scan_start = time(NULL);
+	const int max_scan_sec = (opt_scantime > 0) ? opt_scantime : 3;
+	uint64_t done = 0;
+
 	do
 	{
 		pdata[19] = ++n;
 		le32enc(&endiandata[19], n);
-		adam_base_hash(hash64, &endiandata, cache);
+		adam_base_hash(hash64, &endiandata, tls_adam_cache);
+		done++;
 
 		if ((hash64[7] & mask) == 0)
 		{
@@ -789,16 +761,21 @@ int scanhash_adam(struct work *work, uint32_t max_nonce,
 			{
 				if (fulltest(hash64, ptarget))
 				{
-					pdata[19] = bswap_32(pdata[19]);
-					submit_solution(work, hash64, mythr);
+					pdata[19] = bswap_32(n);
+					bool accepted_sub = submit_solution(work, hash64, mythr);
+					pdata[19] = n;
+					if (accepted_sub)
+						break;
 				}
 			}
 		}
+		if ((done & 0x7fULL) == 0 && (time(NULL) - scan_start) >= max_scan_sec)
+			break;
 	} while (n < max_nonce && !work_restart[thr_id].restart);
 
-	*hashes_done = n - first_nonce + 1;
+	*hashes_done = done;
 	pdata[19] = n;
-	free(cache);
+	tls_last_nonce = n;
 	return 0;
 }
 #endif
